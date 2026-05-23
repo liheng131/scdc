@@ -1,4 +1,17 @@
 <script setup lang="ts">
+/**
+ * 登录页面
+ *
+ * 提供用户名/密码表单登录功能。
+ *
+ * 为什么 @keyup.enter 绑定到 el-form：
+ * - 用户在密码框按 Enter 可直接提交，提升操作效率
+ * - Vue 的事件修饰符 .enter 避免了手动监听 keydown 事件
+ *
+ * 为什么错误在 apiClient 拦截器中处理：
+ * - 统一错误展示（ElMessage），login 函数不需要额外 try/catch
+ * - catch 块为空的目的是避免 Promise rejection 传播到控制台
+ */
 import { ref, reactive } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
@@ -26,7 +39,6 @@ const handleLogin = async () => {
     ElMessage.success('登录成功，正在进入系统...');
     router.push('/');
   } catch (e: any) {
-    // 错误在 apiClient 拦截器中处理
   } finally {
     loading.value = false;
   }

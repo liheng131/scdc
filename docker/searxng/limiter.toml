@@ -1,0 +1,33 @@
+# SearXNG 限流配置
+# 用途：配置 bot 检测和 IP 限流策略
+#
+# 为什么将 Docker 网络段加入 trusted_proxies：
+# - 后端容器从 Docker bridge 网络（172.x.x.x）发起请求
+# - 不在 trusted_proxies 中会导致 bot detection 拒绝请求（403）
+
+[botdetection]
+# 可信代理网络（包含 Docker bridge 网络段）
+ipv4_prefix = 32
+ipv6_prefix = 48
+trusted_proxies = [
+  '127.0.0.0/8',
+  '::1',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '10.0.0.0/8',
+]
+
+[botdetection.ip_limit]
+# 开发环境禁用链接令牌验证
+filter_link_local = false
+link_token = false
+
+[botdetection.ip_lists]
+# 开发环境放行所有私有网络 IP
+block_ip = []
+pass_ip = [
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '10.0.0.0/8',
+]
+pass_searxng_org = true

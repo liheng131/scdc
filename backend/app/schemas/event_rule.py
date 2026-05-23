@@ -1,3 +1,9 @@
+"""
+事件规则 Schema 模块
+
+定义事件监听与自动触发规则的数据校验结构。
+"""
+
 from typing import Optional, List
 from pydantic import BaseModel, Field, ConfigDict
 

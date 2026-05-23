@@ -1,4 +1,20 @@
 <script setup lang="ts">
+/**
+ * 仪表盘（Dashboard）页面
+ *
+ * 系统首页，展示核心指标概览和任务状态分布图。
+ *
+ * 为什么使用 ECharts 饼图展示任务分布：
+ * - 饼图直观展示各状态任务的比例，管理层用户无需查看任务列表即可了解系统负载
+ * - ECharts 的环形图（radius: ['40%', '70%']）视觉效果现代、空间利用率高
+ *
+ * 为什么使用 Promise.all 并行请求：
+ * - 三个 API 互不依赖，并行请求减少总加载时间
+ * - 任一请求失败不影响其他指标展示（stats 初始值为 0）
+ *
+ * 为什么点击报告标题跳转到报告详情：
+ * - 提供从概览到详情的快速导航路径，减少用户操作步骤
+ */
 import { ref, onMounted } from 'vue';
 import { DataLine, Document, List, Connection, RefreshRight } from '@element-plus/icons-vue';
 import * as echarts from 'echarts';

@@ -1,3 +1,12 @@
+/**
+ * 模板 API 服务
+ *
+ * 封装 Jinja2 模板的 CRUD 和沙箱渲染接口。
+ *
+ * renderPreview 说明：
+ * - 发送模板 ID 和变量 JSON 到后端，后端用 Jinja2 渲染并返回结果
+ * - 用户可在线测试模板效果后再保存，降低草稿错误率
+ */
 import apiClient, { type ApiResponse } from '../client';
 
 export interface TemplateInfo {

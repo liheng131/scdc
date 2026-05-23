@@ -1,3 +1,19 @@
+"""
+报告模板服务
+
+提供 Jinja2 模板的 CRUD 和渲染能力，支持报告内容的动态生成。
+
+使用场景：
+- ReporterAgent 生成报告后，通过模板将结构化数据渲染为最终 Markdown 文本
+- 用户可自定义模板内容，调整报告的格式、段落结构、数据展示方式
+- 支持按 scope 分类（如 "report"、"email"、"summary"），按 status 管理生命周期
+
+为什么选择 Jinja2：
+- Python 生态中最成熟的模板引擎，语法简洁
+- 支持条件判断、循环、过滤器等编程能力
+- 沙箱执行（基础 Template 类不含 eval 等危险操作）
+"""
+
 from typing import List, Optional, Dict, Any
 import jinja2
 from sqlalchemy import select
@@ -7,7 +23,6 @@ from app.schemas.template import TemplateCreate, TemplateUpdate
 
 class TemplateService:
     async def create_template(self, session: AsyncSession, tmpl_in: TemplateCreate) -> Template:
-        # Check duplicate name
         existing = await self.get_template_by_name(session, tmpl_in.name)
         if existing:
             raise ValueError(f"Template with name '{tmpl_in.name}' already exists")
@@ -72,6 +87,13 @@ class TemplateService:
         return True
 
     def render_content(self, content: str, variables: Dict[str, Any]) -> str:
+        """
+        使用 Jinja2 渲染模板字符串
+
+        为什么 try/except 捕获 TemplateError：
+        - 用户自定义模板可能存在语法错误（如未闭合的 {{ }}）
+        - 返回明确错误信息比 Jinja2 原始异常栈更友好
+        """
         try:
             tmpl = jinja2.Template(content)
             return tmpl.render(**variables)
@@ -79,6 +101,7 @@ class TemplateService:
             raise ValueError(f"Template rendering syntax error: {e}")
 
     async def render_template(self, session: AsyncSession, tmpl_id: int, variables: Dict[str, Any]) -> str:
+        """根据模板 ID 查找模板并渲染，供 ReporterAgent 调用"""
         t = await self.get_template(session, tmpl_id)
         if not t:
             raise ValueError("Template not found")

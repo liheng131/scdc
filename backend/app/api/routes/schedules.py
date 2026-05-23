@@ -1,3 +1,12 @@
+"""
+定时调度 API 路由
+
+提供基于 Cron 表达式的定时分析任务创建和管理。
+
+SchedulerService 在 FastAPI 启动时自动开始轮询，
+每分钟扫描待执行任务，匹配 Cron 表达式后自动触发。
+"""
+
 from typing import List, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -1,3 +1,12 @@
+"""
+网页爬虫 API 路由
+
+提供 HTTP 网页爬取端点，支持 HTML 自动清洗。
+
+用户传入 URL 即可获取清洗后的纯文本内容，
+便于人工验证数据源质量或手动提取目标页面信息。
+"""
+
 from typing import Any
 from fastapi import APIRouter, Depends
 from app.api.responses import success_response, ResponseModel

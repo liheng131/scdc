@@ -1,3 +1,11 @@
+"""
+定时任务 Schema 模块
+
+定义 Cron 定时分析任务的数据结构。
+
+cron_expr 使用标准 Cron 表达式（如 "0 8 * * *" 表示每天 8:00）。
+"""
+
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from app.schemas.task import TaskOut

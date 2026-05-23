@@ -1,3 +1,18 @@
+"""
+事件触发服务
+
+负责事件规则的 CRUD 和 Webhook 触发处理，实现"事件驱动型 AI 分析"。
+
+支持三种触发类型：
+- keyword: 当 Webhook 传入的 text 字段包含指定关键词时触发
+- metric: 当 metric_value 绝对值达到 threshold 阈值时触发
+- webhook: 无条件触发（收到任何 Webhook 请求都执行分析）
+
+限流机制：
+last_triggered_cache 按 rule_id 记录最近触发时间戳，5 分钟内同一规则不重复触发。
+原因：Webhook 来源可能高频推送（如 Git commit hook），限流防止大量重复任务淹没系统。
+"""
+
 import asyncio
 import logging
 from typing import List, Optional, Dict, Any
@@ -16,7 +31,7 @@ class EventTriggerService:
     def __init__(self, async_session_factory=None):
         self.task_service = TaskService()
         self.async_session_factory = async_session_factory
-        self.last_triggered_cache: Dict[int, float] = {} # rule_id -> timestamp
+        self.last_triggered_cache: Dict[int, float] = {}
 
     async def create_rule(self, session: AsyncSession, rule_in: EventRuleCreate, user_id: int) -> EventRule:
         rule = EventRule(
@@ -46,7 +61,7 @@ class EventTriggerService:
         rule = res.scalar_one_or_none()
         if not rule:
             return None
-        
+
         data = up.model_dump(exclude_unset=True)
         for field, val in data.items():
             setattr(rule, field, val)
@@ -65,11 +80,19 @@ class EventTriggerService:
         return True
 
     async def process_webhook(self, session: AsyncSession, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理 Webhook 事件，匹配规则并触发 AI 分析流水线
+
+        流程：
+        1. 解析 Webhook payload（text / metric_value / source）
+        2. 遍历所有启用的事件规则，检查匹配条件
+        3. 跳过 5 分钟内已触发过的规则（限流）
+        4. 每个匹配规则创建一个 Task，后台执行 OrchestratorAgent
+        """
         text = payload.get("text", "").lower()
         metric_val = payload.get("metric_value", 0.0)
         source = payload.get("source", "webhook")
 
-        # Load active rules
         stmt = select(EventRule).where(EventRule.is_active == True)
         res = await session.execute(stmt)
         rules = res.scalars().all()
@@ -80,9 +103,8 @@ class EventTriggerService:
         triggered_tasks = []
 
         for rule in rules:
-            # Check throttle (5 minutes)
             last_ts = self.last_triggered_cache.get(rule.id, 0)
-            if now - last_ts < 300: # 5 mins cooldown
+            if now - last_ts < 300:
                 continue
 
             matched = False
@@ -119,7 +141,7 @@ class EventTriggerService:
                     except Exception as e:
                         logger.error(f"Event task {tid} failed: {e}", exc_info=True)
                         st = "failed"
-                    
+
                     if self.async_session_factory:
                         async with self.async_session_factory() as s:
                             await self.task_service.update_task(s, tid, TaskUpdate(status=st))

@@ -1,3 +1,12 @@
+"""
+任务 CRUD 服务
+
+提供 Task 和 TaskRun 模型的标准 CRUD 操作。
+
+selectinload(Task.runs) 预加载关联的 TaskRun 记录，避免 N+1 查询问题：
+- 列表查询时一次性加载所有 runs，而不是每条 Task 再单独查询
+"""
+
 import logging
 from datetime import datetime
 from typing import Optional, List, Sequence
@@ -42,11 +51,11 @@ class TaskService:
         task = await self.get_task(session, task_id)
         if not task:
             return None
-        
+
         update_data = task_up.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(task, field, value)
-        
+
         await session.commit()
         logger.info(f"Task updated: {task.id}")
         return await self.get_task(session, task.id)
@@ -79,11 +88,11 @@ class TaskService:
         run = result.scalar_one_or_none()
         if not run:
             return None
-        
+
         up_data = run_up.model_dump(exclude_unset=True)
         for field, val in up_data.items():
             setattr(run, field, val)
-        
+
         await session.commit()
         await session.refresh(run)
         logger.info(f"TaskRun updated: {run.id} (status: {run.status})")

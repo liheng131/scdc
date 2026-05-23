@@ -1,3 +1,13 @@
+"""
+通知规则 API 路由
+
+提供通知渠道和触发条件的 CRUD 管理。
+
+支持两种通知渠道：
+- email: 通过 SMTP 发送邮件（使用 Jinja2 模板渲染 HTML 正文）
+- webhook: 向目标 URL 发送 POST 请求（兼容钉钉/飞书机器人格式）
+"""
+
 from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession

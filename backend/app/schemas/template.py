@@ -1,3 +1,11 @@
+"""
+模板 Schema 模块
+
+定义 Prompt/报告/通知模板的数据校验结构。
+
+scope 三种取值对应不同的下游消费场景。
+"""
+
 from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict

@@ -1,3 +1,14 @@
+"""
+数据源 Schema 模块
+
+定义数据源接入配置的数据校验结构。
+
+AliasChoices("type", "source_type") 实现字段别名：
+- 前端可能发送 "source_type" 字段名（兼容旧版 API）
+- 后端内部统一使用 "type" 字段名
+- 序列化输出时使用 "source_type"（serialization_alias）
+"""
+
 from typing import Optional, Any, Dict
 from datetime import datetime
 from pydantic import BaseModel, Field, AliasChoices

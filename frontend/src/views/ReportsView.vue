@@ -1,4 +1,21 @@
 <script setup lang="ts">
+/**
+ * 智能研报中心页面
+ *
+ * 展示 AI 生成的研报列表，支持搜索、在线阅读和多格式导出。
+ *
+ * 为什么使用卡片网格布局 (el-card + el-row) 而非表格：
+ * - 研报信息量大（标题、摘要、版本、时间），卡片布局信息承载丰富度更高
+ * - 卡片悬停动画和视觉层次适合管理层用户浏览和决策
+ *
+ * 为什么使用 el-drawer 展示报告正文：
+ * - 抽屉从右侧滑入，不中断当前浏览流程，关闭后回到列表页
+ * - 65% 宽度提供充足阅读空间，适配 Markdown 渲染的长文档
+ *
+ * 为什么 exportReportUrl 使用 window.open 而非 axios 下载：
+ * - 文件下载需触发浏览器原生下载行为（Content-Disposition 响应头）
+ * - URL 中携带 Token 参数实现认证，无需 axios 拦截器
+ */
 import { ref, onMounted } from 'vue';
 import { reportsApi, type ReportInfo } from '../api';
 import { Refresh, Download, View, Printer, Search } from '@element-plus/icons-vue';

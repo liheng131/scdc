@@ -1,3 +1,12 @@
+"""
+数据源模型
+
+定义 data_sources 表，存储外部数据接入配置（搜素引擎、RSS、API 等）。
+
+config 字段使用 JSONB 存储任意结构的连接配置，支持不同数据源类型的自定义参数。
+schedule 字段用于定时拉取，enabled 控制数据源启用状态（停用而非删除）。
+"""
+
 from typing import Any, Dict
 from sqlalchemy import String, Boolean
 from sqlalchemy.orm import Mapped, mapped_column

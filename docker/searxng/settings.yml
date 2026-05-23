@@ -1,0 +1,47 @@
+# SearXNG 配置文件
+# 用途：配置元搜索引擎的行为，包括启用的搜索引擎、限流策略、API 访问控制等
+#
+# 为什么禁用 wikidata 引擎：
+# - wikidata 需要访问外部 SPARQL 端点，在 Docker 容器网络中经常超时
+# - 禁用后避免容器启动时初始化失败
+
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "scdc_searxng_secret_key_2024"
+  limiter: false
+
+valkey:
+  url: "redis://redis:6379/2"
+
+engines:
+  - name: wikidata
+    disabled: true
+  - name: ahmia
+    disabled: true
+  - name: torch
+    disabled: true
+
+search:
+  safe_search: 0
+  autocomplete: "google"
+  default_lang: "zh-CN"
+  max_page: 3
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  useragent_suffix: ""
+  enable_http2: true
+  pool_connections: 100
+  pool_maxsize: 20
+
+# 开发环境禁用所有 bot 检测
+# 为什么设置 enabled_engines 为空列表：
+# - 让 SearXNG 使用默认启用的搜索引擎，而不是手动指定
+# - 避免引擎配置错误导致容器启动失败

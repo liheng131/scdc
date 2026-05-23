@@ -1,3 +1,9 @@
+"""
+通知规则 Schema 模块
+
+定义通知渠道和触发条件的数据校验结构。
+"""
+
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 

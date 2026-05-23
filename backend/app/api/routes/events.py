@@ -1,3 +1,12 @@
+"""
+事件规则 API 路由
+
+提供事件监听规则的 CRUD 管理，支持以下事件类型：
+- webhook: 接收外部 Webhook 推送后触发分析
+- keyword: 文本内容包含指定关键词时触发
+- metric: 指标值达到阈值时触发
+"""
+
 from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession

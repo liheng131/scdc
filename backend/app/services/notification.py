@@ -1,3 +1,18 @@
+"""
+通知服务
+
+提供多渠道通知能力（邮件 + Webhook）和通知规则的 CRUD 管理。
+
+架构说明：
+- NotificationAdapter 是抽象基类，定义 send() 接口
+- EmailAdapter: 通过 SMTP 发送 HTML 格式邮件，SMTP 操作在线程池中执行避免阻塞事件循环
+- WebhookAdapter: 向目标 URL 发送 POST 请求（钉钉/飞书等兼容格式）
+
+为什么使用适配器模式：
+- 新增通知渠道（如企业微信、Slack）只需实现新的 Adapter 子类
+- NotificationService 通过 self.adapters dict 动态路由，无需修改已有代码
+"""
+
 import asyncio
 import logging
 import smtplib
@@ -19,6 +34,7 @@ class NotificationAdapter:
 
 class EmailAdapter(NotificationAdapter):
     async def send(self, target: str, title: str, content: str) -> bool:
+        """通过 SMTP 发送邮件通知，异步委托到线程池执行"""
         if not settings.smtp_host:
             logger.warning("SMTP host not configured. Skipping email send.")
             return False
@@ -45,6 +61,7 @@ class EmailAdapter(NotificationAdapter):
 
 class WebhookAdapter(NotificationAdapter):
     async def send(self, target: str, title: str, content: str) -> bool:
+        """向 Webhook URL 发送 Markdown 格式消息（兼容钉钉机器人格式）"""
         payload = {
             "msgtype": "markdown",
             "markdown": {
@@ -114,6 +131,13 @@ class NotificationService:
         return True
 
     async def notify(self, session: AsyncSession, trigger: str, title: str, content: str) -> dict:
+        """
+        根据触发事件类型查找启用的通知规则，调用对应适配器发送通知
+
+        为什么内置 3 次重试 + 指数退避：
+        - 邮件服务器/Webhook 接收端可能有瞬时不可用
+        - 2^1=2s / 2^2=4s / 2^3=8s 的退避间隔给服务恢复时间
+        """
         stmt = select(NotificationRule).where(NotificationRule.enabled == True).where(NotificationRule.trigger == trigger)
         res = await session.execute(stmt)
         rules = res.scalars().all()
@@ -123,16 +147,15 @@ class NotificationService:
             adapter = self.adapters.get(r.channel)
             if not adapter:
                 continue
-            
+
             success = False
-            # 3 retries with exponential backoff
             for attempt in range(1, 4):
                 if await adapter.send(r.target, title, content):
                     success = True
                     break
                 logger.warning(f"Notification send failed for rule {r.id}, retrying attempt {attempt+1}")
                 await asyncio.sleep(2 ** attempt)
-            
+
             results[r.id] = success
-        
+
         return results

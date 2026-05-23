@@ -1,3 +1,14 @@
+"""
+任务触发 API 路由
+
+提供同步和 SSE 流式两种方式触发 AI 分析流水线。
+
+为什么同时提供两种模式：
+- /qa（同步）：适合简单场景，一次请求完成全部分析并返回报告
+- /qa/stream（SSE 流式）：前端可实时展示各阶段进度，增强用户体验
+  每个阶段完成后向客户端推送 event: stage_update，前端据此更新进度条
+"""
+
 from typing import Any
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends

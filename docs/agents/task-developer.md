@@ -19,8 +19,9 @@ Before you begin any development task, you MUST understand these documents in or
 5. `/docs/flow.md`
 
 Use them this way:
-- `plan.md`: task breakdown, acceptance criteria, parent module brief scheme, related-task coordination notes
-- `process.md`: runtime execution record for the current task item
+- `plan.md`: task intentions, requirements, and acceptance criteria
+- `process.md`: lightweight index for current task and per-step file references
+- `docs/process/step-NN.md`: per-step execution record file containing the task blueprint, implementation records, and review history
 
 If any required document is missing or materially incomplete, inform the user before proceeding.
 
@@ -30,16 +31,18 @@ If any required document is missing or materially incomplete, inform the user be
 
 When a task item has completed design and is ready for implementation:
 
-1. **Read process.md** and identify:
+1. **Read process.md** §1-§4 to identify the current battlefield, task list, and locate the per-step execution record file. Then read that `docs/process/step-NN.md` file and identify:
    - the task-item blueprint
    - the current task item and status
    - the latest execution-required information
    - any prior review notes or rework history
 
-2. **Read plan.md** and confirm:
+2. **Read process.md §3 and cross-reference plan.md** to confirm:
    - the task item's requirements and acceptance criteria
+   - the task item's type (`feature`, `bugfix`, or `refactor`)
    - the parent module's brief technical scheme
    - related task items, ordering, and integration expectations
+   - for bugfix/refactor: the `影响Step` column — which original tasks are impacted
 
 3. **Clarify ambiguities** before coding if requirements, design details, interfaces, or acceptance criteria are unclear.
 
@@ -47,22 +50,22 @@ When a task item has completed design and is ready for implementation:
 
 5. **Develop following strict TDD**.
 
-6. **Finalize process.md** after implementation with:
-   - **Status**: set the task item status to `develop_done`
-   - **Execution chain**: append `"develop_done"` to the task item's execution chain array
-   - Under the correct `#### Step X: [任务名称]` group in section 4.2, record:
+6. **Finalize per-step file and process.md** after implementation with:
+   - **Status**: set the task item status to `develop_done` in process.md §3
+   - **Execution chain**: append `"develop_done"` to the task item's execution chain array in process.md §3
+   - In the per-step execution record file (`docs/process/step-NN.md`) under the `## 开发实现` section, record:
      - **改动范围锚点**: file paths + class names / method names / line ranges (or Git Commit Hash). Do NOT just list file names.
      - **具体改动**: what was changed and why (especially for rework).
      - **TDD 物理凭证**: paste the terminal output of core test runs proving tests pass. This is mandatory physical evidence.
    - notes the reviewer will need
-   - **Note**: section 4 of `process.md` is organized by Step. Each Step has its own `####` heading. Within each Step, each iteration uses a `#####` heading with date. Always prepend new records (latest first) under the correct Step group. Never overwrite history.
+   - **Note**: each per-step file is organized into `## 设计方案`, `## 开发实现`, `## 审阅意见`, `## 回滚与验证记录` sections. Each iteration uses a `#####` heading with date. Always prepend new records (latest first). Never overwrite history.
 
 ### Entry Point 2: Review Rejection (Development Issue)
 
 When a task item failed review because of a development issue:
 
 1. Read `/docs/process.md` and identify the task-item blueprint, latest review findings, current status, and return-loop count.
-2. Revisit `/docs/plan.md` for the same task item's requirements, module context, and related tasks.
+2. Revisit `/docs/process.md` §3 and `/docs/plan.md` for the same task item's requirements, module context, and related tasks.
 3. Clarify if the review feedback is ambiguous.
 4. Update `/docs/process.md` to reflect redevelopment / rework in progress.
 5. Fix all review issues systematically, addressing root causes rather than symptoms.
@@ -86,6 +89,16 @@ For all development work, follow strict TDD:
 1. Improve structure, readability, naming, and maintainability while preserving behavior.
 2. Re-run tests after every meaningful refactor.
 
+### Task-Type-Specific TDD Requirements
+
+#### Bugfix
+- Regression tests are mandatory: cover the exact bug scenario plus adjacent edge cases
+- The failing test (Red phase) must reproduce the original bug before the fix is written
+
+#### Refactor
+- Behavior preservation tests are mandatory: prove the refactored code produces identical output to the original for a representative input set
+- The TDD physical evidence must include both the behavior preservation test and regression test results
+
 ## Code Quality Standards
 
 Your code must be:
@@ -104,13 +117,12 @@ You are responsible for maintaining `/docs/process.md` accurately throughout dev
 - **Execution-required information** for design, development, and review
 - **Return-loop history** where applicable
 
-Do not turn `process.md` into a module-design document. Module-level summary information belongs in `plan.md`.
+Do not turn the per-step file into a module-design document. Module-level summary information belongs in `process.md` §2.
 
-After every significant action, update `process.md` promptly.
+After every significant action, update the per-step file and process.md promptly.
 
 ### State Machine Rules (Developer's Scope)
-- **No Task Hallucination**: Do NOT invent or assume the existence of task items not explicitly written in the `plan.md` tabular lists.
-- **Strict Dependency Enforcement**: Ensure prerequisite tasks in `plan.md` are marked `done`. Do not start developing out of sequence.
+- All shared collaboration rules (No Task Hallucination, Strict Dependency Enforcement, state machine, execution discipline) are defined in `/docs/flow.md` — follow them strictly.
 - **Entry states**: `design_done` (first-time development) or `review_failed_dev` (rework)
 - **On entry**: set status to `developing`, append `"developing"` to execution chain
 - **On completion**: set status to `develop_done`, append `"develop_done"` to execution chain
@@ -120,14 +132,17 @@ After every significant action, update `process.md` promptly.
 ## Self-Verification Checklist
 
 Before declaring a task ready for review, verify:
-- [ ] The task item explicitly exists in the `plan.md` task list (No hallucinated tasks)
+- [ ] The task item explicitly exists in `process.md` §3 (No hallucinated tasks)
 - [ ] All tests pass
 - [ ] All acceptance criteria from `plan.md` are met
-- [ ] Code follows the task-item blueprint in `process.md`
-- [ ] The implementation respects the parent module constraints and related-task assumptions from `plan.md`
+- [ ] Code follows the task-item blueprint in the step-NN.md file
+- [ ] The implementation respects the parent module constraints from `process.md` §2
 - [ ] Edge cases are handled
 - [ ] No debug residue or commented-out code remains
 - [ ] `process.md` has been updated
+- [ ] For bugfix: regression tests covering the original bug scenario and adjacent edge cases are included
+- [ ] For refactor: behavior preservation tests prove identical output for representative inputs
+- [ ] For bugfix/refactor: the impacted original Steps (listed in `影响Step`) are NOT modified by this task; only the incremental fix task's own files are changed
 
 ## Communication Rules
 

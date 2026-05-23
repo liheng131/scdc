@@ -1,3 +1,11 @@
+"""
+自定义数据类型模块
+
+提供跨数据库兼容的自定义 SQLAlchemy 类型（如 JSONB），
+在 PostgreSQL 下使用原生 JSONB 实现高性能 JSON 存储，
+在 SQLite/其他数据库下自动降级为 JSON 文本类型。
+"""
+
 import json
 from sqlalchemy.types import TypeDecorator, JSON, Text
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB

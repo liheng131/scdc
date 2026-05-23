@@ -1,3 +1,11 @@
+"""
+报告 Schema 模块
+
+定义报告创建、更新、查询的数据校验结构。
+
+version 字段支持报告版本管理，draft/published/archived 状态用于发布工作流。
+"""
+
 from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict

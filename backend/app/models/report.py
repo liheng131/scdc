@@ -1,3 +1,15 @@
+"""
+报告模型
+
+定义 reports 表，存储 AI 分析产出的结构化报告。
+
+设计要点：
+- task_id 外键关联到 tasks 表，一个任务可产生多个版本的报告
+- version 字段支持报告版本迭代（v1.0, v2.0…）
+- content_markdown 存储 Markdown 格式的完整报告正文
+- storage_ref 预留字段，用于指向外部存储（如 S3 / MinIO）中的导出文件路径
+"""
+
 from typing import Optional
 from sqlalchemy import String, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column

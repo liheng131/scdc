@@ -5,6 +5,8 @@
 > **最后更新**: 2026-05-14  
 > **状态**: 维护中  
 > **关联文档**: [PRD](./prd.md) | [架构文档](./architecture.md) | [技术栈文档](./tech.md) | [分步计划](./plan.md)
+>
+> **本文档是三个 Agent（task-designer / task-developer / task-gatekeeper-reviewer）的共享协作协议，为状态机、流转规则、执行纪律的唯一权威来源。** 其他文档中涉及相同内容时应引用本文档而非重定义。
 
 ---
 
@@ -78,6 +80,9 @@ flowchart TD
     
     any((任意进行中状态)) -->|需求模糊/前置依赖缺失| blocked
     blocked -->|向用户澄清/获得输入| resumed((恢复对应状态))
+    
+    done -->|发现缺陷/重构需求| rolled_back
+    rolled_back --> done
 ```
 
 ### 异常流转规则：
@@ -93,6 +98,106 @@ flowchart TD
 3. **需求问题与阻塞 (`blocked`)**
    - **流转路径**: 遭遇外部障碍 -> `blocked` -> 暂停并向用户提问 -> 获得答复 -> 继续 `designing` 或 `developing`
    - **执行逻辑**: 若 `prd.md` 定义不清或出现不可解决的技术冲突，Agent 无法自行决策，必须通过 `blocked` 状态暂停执行，等待人类用户的明确答复后再恢复工作。
+
+## 4.3 任务回滚流转（Bug 修复 / 重构 / 重写）
+
+当已完成任务（`done`）被发现存在缺陷或需要进行重构/重写时，触发回滚流程。**回滚动作不在原始任务上执行，而是创建新的增量任务（M8: 增量任务），原始任务仅作为"挂起标记"表示当前不可信。**
+
+### 回滚流转图
+
+```mermaid
+flowchart TD
+    subgraph 原始任务
+        OD[done] -->|发现缺陷/重构需求| OR[rolled_back]
+        OR -->|修复任务 done + 验证通过| OD2[done]
+    end
+    
+    subgraph 增量修复任务
+        B[backlog] --> D[designing] --> DD[design_done] --> DV[developing] --> DVD[develop_done] --> R[reviewing] --> DN[done]
+    end
+```
+
+### 回滚执行规则
+
+1. **创建增量任务**
+   - 用户在 `process.md` §3 创建新的增量任务（type=`bugfix` 或 `refactor`，Step 编号从 25 开始递增）
+   - 增量任务必须填写"影响范围"（列出受影响的原始 Step）
+   - 增量任务走完整的 `backlog → designing → design_done → developing → develop_done → reviewing → done` 标准流程
+
+2. **原始任务标记**
+   - 增量任务创建后，影响范围内的所有原始任务状态从 `done` 变更为 `rolled_back`
+   - `rolled_back` 表示"原始任务暂时不可信，等待修复验证"
+   - 原始任务不重新进入设计/开发流程，其历史记录完整保留
+
+3. **依赖影响分析（设计 Agent 在增量任务 design_done 时执行）**
+   - 判定修复是否变更原始任务的接口/契约（函数签名、API 返回结构、DB schema）
+   - **接口不变**：下游任务保持 `done`，在 `process.md` 中追加"已验证不受影响"备注
+   - **接口变更**：检查 `process.md` §3 中原始任务的所有下游依赖链，列出受影响任务列表
+
+4. **级联回滚规则（仅接口变更时触发）**
+   - 设计 Agent 列出受影响的下游任务后，**暂停执行**
+   - 在 `process.md` §5 输出影响分析报告，等待用户确认
+   - 用户确认后，受影响任务 `done → rolled_back`
+   - 修复顺序：按依赖链从上到下（先修上游，再修下游）
+   - **重要**：增量任务的设计方案需要在"下游适配方案"章节中覆盖所有级联适配内容
+
+5. **恢复条件**
+   - 增量修复任务审阅通过（`done`）
+   - 原始任务的验收标准经再次验证仍满足
+   - 受影响的下游任务（若级联回滚）逐个验证通过
+   - 满足以上条件后，各 `rolled_back` 任务恢复为 `done`
+   - **验证不通过**：自动为该任务创建新的增量修复任务
+
+6. **接口变更判定标准**
+   - 函数/方法签名变更（参数增删、返回值类型变更）
+   - API 端点路径、请求体/响应体结构变更
+   - 数据库 schema 变更（表结构、字段类型、约束变更）
+   - 不满足以上条件但可能导致下游行为异常的数据语义变更，也视为接口变更
+   - 仅内部实现逻辑变更、不改变输入输出约定的，不属于接口变更
+
+### 回滚场景分类
+
+#### 场景一：Bug 修复（接口不变）
+
+```text
+原始任务: done → rolled_back → (修复任务 done) → done
+修复任务: backlog → designing → design_done → developing → develop_done → reviewing → done
+```
+
+设计方案必填项：缺陷表现、复现步骤、根因分析。  
+审阅核心关注：是否修复根因、是否引入回归。
+
+#### 场景二：重构/重写（接口不变）
+
+```text
+原始任务: done → rolled_back → (修复任务 done) → done
+修复任务: backlog → designing → design_done → developing → develop_done → reviewing → done
+```
+
+设计方案必填项：重构动机、重构前后对比、兼容性说明。  
+审阅核心关注：行为是否保持不变、接口兼容性。  
+TDD 物理凭证必须包含行为不变的对比测试 + 回归测试。
+
+若重构同时改变了外部行为（如修改 API 响应字段名），该改变属于接口变更，触发场景三的级联机制，但任务类型仍标记为 `refactor`。
+
+#### 场景三：Bug 修复 / 重构导致接口变更（级联回滚）
+
+```text
+原始任务: done → rolled_back → (等待确认) → rolled_back → (修复验证) → done
+受影响下游任务: done → (等待确认) → rolled_back → (逐个验证) → done
+修复任务: backlog → designing → design_done → developing → develop_done → reviewing → done
+```
+
+级联回滚只发生在接口/契约变更时。内部实现修复不触发级联。  
+设计 Agent 在 design_done 时完成影响分析并暂停，等待用户确认后再继续。
+
+#### 场景四：新增功能（无回滚）
+
+```text
+backlog → designing → design_done → developing → develop_done → reviewing → done
+```
+
+与标准主流程一致，任务类型标记为 `feature`。不触发任何已有任务的 `rolled_back`。若新增功能需要修改已有代码，受影响 Step 按场景一或场景三处理。
 
 ---
 
@@ -117,14 +222,14 @@ flowchart TD
 ### 5.1.3 输出
 
 - 任务项级设计方案（首次或返工）
-- 必要时同步 `plan.md` 中的模块简略方案与任务项关联关系
+- 必要时同步 `process.md` §2 中的模块简略方案与任务项关联关系
 - `process.md` 中的设计记录与状态更新
 
 ### 5.1.4 设计阶段规则
 
 - 设计始终按**任务项级**进行。
-- 为避免忽略跨任务关联，设计时必须同时检查并维护 `plan.md` 中所属模块的**简略技术方案**与**任务项关联关系**。
-- `plan.md` 中的模块级信息只保留共享上下文，不代替任务项级执行设计。
+- 为避免忽略跨任务关联，设计时必须同时检查并维护 `process.md` §2 中所属模块的**简略技术方案**与**任务项关联关系**。
+- `process.md` §2 中的模块级信息只保留共享上下文，不代替任务项级执行设计。
 - 设计必须显式覆盖：
   - 所属模块上下文
   - 架构定位
@@ -214,7 +319,7 @@ flowchart TD
    对照 `plan.md` 与 `prd.md`，检查所有验收标准是否满足。
 
 2. 设计与架构合规性  
-   对照 `process.md` 中方案、`plan.md` 中模块简略方案与 `architecture.md`，检查实现是否越界、违背模块边界或错误使用流程。
+   对照 `process.md` §2 中模块简略方案、per-step 文件中的设计方案与 `architecture.md`，检查实现是否越界、违背模块边界或错误使用流程。
 
 3. 代码质量  
    对照 `tech.md`，检查可读性、可维护性、错误处理、日志、结构与命名。
@@ -250,7 +355,7 @@ flowchart TD
 规则：
 
 - 只允许修改失败任务项的方案
-- 若失败暴露的是共享假设问题，只允许最小范围同步 `plan.md` 中对应模块的简略方案或任务关联，不允许借返工之名重写整个模块方案
+- 若失败暴露的是共享假设问题，只允许最小范围同步 `process.md` §2 中对应模块的简略方案或任务关联，不允许借返工之名重写整个模块方案
 - 必须在 `process.md` 里记录“因何失败、如何修正”
 
 ### 6.2.2 开发问题返工
@@ -325,6 +430,7 @@ flowchart TD
 | `review_failed_dev` | 审阅失败，开发问题 |
 | `blocked` | 阻塞中 |
 | `done` | 已完成 |
+| `rolled_back` | 已完成但因缺陷/重构需求回滚，等待修复验证 |
 
 ## 8.2 合法流转
 
@@ -337,6 +443,9 @@ reviewing -> review_failed_dev -> developing -> develop_done  -> reviewing
 
 任意状态 -> blocked
 blocked -> designing / developing / reviewing
+
+done -> rolled_back
+rolled_back -> done
 ```
 
 ---
@@ -357,7 +466,7 @@ blocked -> designing / developing / reviewing
 4. 执行所需信息  
    设计方案、开发改动、审阅意见等供下一角色接手的信息。
 
-如果缺少 `process.md`，建议基于 [process_template.md](./templates/process_template.md) 初始化，而不是临时自由发挥。
+如果缺少 `process.md`，基于 [process_template.md](./templates/process_template.md) 初始化，不要临时自由发挥格式。
 
 ---
 
@@ -391,12 +500,48 @@ blocked -> designing / developing / reviewing
 执行说明: 设计/审阅阶段发现需求不明确 -> 标记阻塞并暂停 -> 向用户澄清 -> 澄清后恢复相应状态继续
 ```
 
+## 10.5 Bug 修复（接口不变）
+
+```text
+原始任务: done -> rolled_back -> done
+修复任务: backlog -> designing -> design_done -> developing -> develop_done -> reviewing -> done
+执行说明: 发现缺陷 -> 创建 M8 bugfix 任务 -> 原始任务标记 rolled_back -> 修复任务走完整标准流程 ->
+          审阅通过 -> 验证原始任务验收标准仍满足 -> 原始任务恢复 done
+```
+
+## 10.6 重构/重写（接口不变）
+
+```text
+原始任务: done -> rolled_back -> done
+修复任务: backlog -> designing -> design_done -> developing -> develop_done -> reviewing -> done
+执行说明: 重构需求 -> 创建 M8 refactor 任务 -> 原始任务标记 rolled_back -> 修复任务走完整标准流程 ->
+          审阅通过 -> 验证行为不变 -> 原始任务恢复 done
+```
+
+## 10.7 重构导致接口变更（级联回滚）
+
+```text
+原始任务: done -> rolled_back -> (暂停确认) -> rolled_back -> done
+受影响下游任务: done -> (暂停确认) -> rolled_back -> done
+修复任务: backlog -> designing -> design_done -> (暂停确认) -> developing -> develop_done -> reviewing -> done
+执行说明: 重构任务创建 -> 原始任务 done -> rolled_back -> 设计 Agent 分析依赖链 ->
+          发现接口变更影响下游 -> 暂停，列出受影响任务让用户确认 -> 用户确认后下游也 rolled_back ->
+          修复任务开发 -> 审阅通过 -> 按依赖顺序逐个验证 -> 全部恢复 done
+```
+
+## 10.8 新增功能
+
+```text
+状态流转: backlog -> designing -> design_done -> developing -> develop_done -> reviewing -> done
+执行说明: 与标准主流程一致。任务类型标记为 feature。不触发已有任务的 rolled_back。
+```
+
 ---
 
 ## 11. 执行纪律
 
-- **严禁凭空捏造任务 (白名单制)**: `plan.md` 是唯一合法的任务源。任何 Agent 绝对禁止生成、扩展、臆想或执行 `plan.md` 任务清单中未显式定义的 Step X。
-- **严格串行依赖拦截**: 任何任务开始前，必须核对 `plan.md` 中定义的“前置依赖”。若存在依赖项且该依赖项状态非 `done`，则该任务立即进入 `blocked`，严禁跨级跳步执行。
+- **严禁凭空捏造任务 (白名单制)**: `process.md` §3 是任务跟踪的权威来源。任何 Agent 绝对禁止生成、扩展、臆想或执行其中未列出的 Step。`plan.md` 提供任务原始意图，首次启动时由设计 Agent 解析后初始化 `process.md` §3。
+- **严格串行依赖拦截**: 任何任务开始前，必须核对 `process.md` §3 中的”前置依赖”列。若存在依赖项且该依赖项状态非 `done`，则该任务立即进入 `blocked`，严禁跨级跳步执行。
 - 不得跳过设计直接开发未定义任务
 - 不得跳过审阅直接标记完成
 - 不得把设计问题伪装成开发问题处理

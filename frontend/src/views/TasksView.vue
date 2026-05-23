@@ -1,4 +1,21 @@
 <script setup lang="ts">
+/**
+ * 分析任务管理页面
+ *
+ * 提供任务的列表查看、创建和手动执行功能。
+ *
+ * handleRun 错误处理说明：
+ * - HTTP 层面的错误（401/403/500）已在 apiClient 响应拦截器中用 ElMessage 展示
+ * - 此处 try/catch 确保 runLoadingMap 正确重置，避免按钮永久处于 loading 状态
+ *
+ * 为什么 status 标签颜色按状态动态切换：
+ * - Element Plus 的 el-tag type 属性支持 success/primary/warning 等语义色
+ * - 用户可通过颜色快速判断任务状态，无需阅读文字
+ *
+ * 为什么 showDetail 展示独立弹窗而不是路由跳转：
+ * - 任务详情信息量不大，弹窗即可承载，无需切换到独立页面
+ * - 关闭弹窗后用户仍在任务列表页，保持操作上下文
+ */
 import { ref, reactive, onMounted } from 'vue';
 import { tasksApi, type TaskInfo } from '../api';
 import { Plus, Refresh, VideoPlay, Tickets } from '@element-plus/icons-vue';

@@ -1,3 +1,16 @@
+"""
+用户模型
+
+定义 users 表结构，存储系统用户的基本信息和权限角色。
+
+角色设计（UserRole）：
+- admin: 管理员，拥有全部操作权限
+- analyst: 分析师，可创建任务、查看报告和发起分析
+- viewer: 浏览者，只读权限，仅可查看共享的报告
+
+status 字段用于启用/禁用用户，而非直接删除记录。
+"""
+
 import enum
 from sqlalchemy import String, Enum
 from sqlalchemy.orm import Mapped, mapped_column

@@ -1,3 +1,12 @@
+"""
+文档解析 API 路由
+
+提供文件上传和自动解析端点。
+
+ParserManager 根据文件扩展名自动路由到对应解析器（PDF/Word/Excel），
+返回标准化的 ParseResult（包含全文内容和分块列表）。
+"""
+
 from typing import Any
 from fastapi import APIRouter, UploadFile, File, Depends
 from app.api.responses import success_response, ResponseModel

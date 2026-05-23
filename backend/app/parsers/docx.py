@@ -1,3 +1,14 @@
+"""
+Word 文档解析器
+
+使用 python-docx 库解析 .docx 文件，提取段落文本和表格内容。
+
+为什么分别处理段落和表格：
+- 段落（paragraph）和表格（table）在 Word 文档中是独立的元素类型
+- 表格中的信息（如数据对比、统计表格）通常具有独立的语义价值
+- metadata 中标记 chunk 类型（paragraph/table）便于 ReporterAgent 区分展示格式
+"""
+
 import io
 from typing import BinaryIO
 import docx
@@ -12,8 +23,7 @@ class DocxParser(BaseParser):
             full_text = []
             chunks = []
             chunk_idx = 1
-            
-            # Paragraphs
+
             for p in doc.paragraphs:
                 text = p.text.strip()
                 if text:
@@ -24,8 +34,7 @@ class DocxParser(BaseParser):
                         metadata={"type": "paragraph"}
                     ))
                     chunk_idx += 1
-                    
-            # Tables
+
             for t_idx, table in enumerate(doc.tables):
                 table_text = []
                 for row in table.rows:
@@ -41,7 +50,7 @@ class DocxParser(BaseParser):
                         metadata={"type": "table", "table_index": t_idx + 1}
                     ))
                     chunk_idx += 1
-            
+
             content = "\n\n".join(full_text)
             return ParseResult(
                 filename=filename,

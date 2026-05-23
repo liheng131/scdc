@@ -1,4 +1,21 @@
 <script setup lang="ts">
+/**
+ * 主布局组件（侧边栏 + 顶部导航）
+ *
+ * 所有需要登录认证的页面共享此布局。
+ *
+ * 为什么侧边栏用 el-menu 的 router 属性：
+ * - el-menu 原生支持 router-link 集成，点击菜单项自动触发路由切换
+ * - default-active 绑定 route.path 自动高亮当前页面菜单项
+ *
+ * 为什么可折叠设计（isCollapse）：
+ * - 收起侧边栏释放横向空间，适配较小屏幕或用户偏好
+ * - el-menu 的 collapse 属性原生支持折叠动画
+ *
+ * 为什么使用 transition 包裹 RouterView：
+ * - fade-transform 动画提供页面切换的视觉过渡，提升用户体验
+ * - mode="out-in" 确保旧页面完全离开再进入新页面，避免布局闪烁
+ */
 import { ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { useAuthStore } from '../../stores/auth';

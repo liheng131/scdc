@@ -1,9 +1,15 @@
+# Prometheus 监控配置
+#
+# 职责：定期从后端 FastAPI 应用抓取性能指标（请求量、延迟、错误率等）
+# 访问地址：http://localhost:9090（Prometheus Web UI）
+
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 15s  # 每 15 秒采集一次指标
+  evaluation_interval: 15s  # 每 15 秒评估一次告警规则
 
 scrape_configs:
+  # 后端服务指标采集
   - job_name: "scdc_backend"
-    metrics_path: "/api/v1/metrics"
+    metrics_path: "/api/v1/metrics"  # FastAPI 通过 prometheus_fastapi_instrumentator 暴露的端点
     static_configs:
-      - targets: ["backend:8000"]
+      - targets: ["backend:8000"]  # Docker 内部网络地址

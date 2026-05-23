@@ -1,4 +1,21 @@
 <script setup lang="ts">
+/**
+ * 系统设置页面
+ *
+ * 管理 LLM 推理引擎参数、自动化调度和通知分发配置。
+ *
+ * 为什么使用 el-divider 分区：
+ * - 系统配置可分为 AI 模型参数和调度分发通道两大类
+ * - el-divider 的 content-position="left" 提供清晰的视觉分隔，用户快速定位配置项
+ *
+ * 为什么 API Key 使用 type="password" + show-password：
+ * - 敏感凭据默认掩码显示，show-password 提供手动查看的灵活性
+ * - 前端不持久化 API Key（real-time reactive），符合安全最佳实践
+ *
+ * 为什么 temperature 使用 el-slider 而非 el-input-number：
+ * - Temperature 范围固定为 [0, 1]，滑块更直观地展示"严谨 vs 发散"的调节语义
+ * -滑块拖动操作效率高，比输入数字更符合管理层用户的配置习惯
+ */
 import { reactive } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Check } from '@element-plus/icons-vue';

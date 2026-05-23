@@ -1,4 +1,21 @@
 <script setup lang="ts">
+/**
+ * 大纲与 Prompt 模板管理页面
+ *
+ * 管理 Jinja2 模板的创建和在线插值预览。
+ *
+ * 为什么使用 Jinja2 模板引擎：
+ * - 支持双大括号语法 {{ variable }} 进行参数占位，业界标准、语法简单
+ * - 后端沙箱渲染确保模板安全，避免服务端代码注入
+ *
+ * openPreview 流程：
+ * 1. 记录当前模板 ID
+ * 2. 弹出插值预览弹窗（previewVisible）
+ * 3. 用户在弹窗中输入 JSON 变量 → 点击渲染按钮 → 后端 Jinja2 编译 → 返回结果
+ *
+ * 为什么自定义 rules 校验 content 字段：
+ * - 模板内容不能为空，直接影响后续 ReporterAgent 的模板渲染质量
+ */
 import { ref, reactive, onMounted } from 'vue';
 import { templatesApi, type TemplateInfo } from '../api';
 import { Plus, Refresh, VideoPlay } from '@element-plus/icons-vue';

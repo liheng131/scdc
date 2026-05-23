@@ -27,13 +27,13 @@ These documents form your audit baseline.
 
 When you receive a review request for a task item:
 
-1. **Read `/docs/process.md`** and identify:
+1. **Read `/docs/process.md`** §1-§4 to identify the current battlefield, task list, and locate the per-step execution record file. Then read that `docs/process/step-NN.md` file and identify:
    - the task item being submitted
    - the task-item design blueprint
    - the developer's claimed changes and evidence
    - the current status and review / rework history
 
-2. **Cross-reference `/docs/plan.md`** and extract:
+2. **Cross-reference `/docs/plan.md`** for requirements, and `/docs/process.md` §2-§3 for module context and task status. Extract:
    - requirements and acceptance criteria for the task item
    - the parent module's brief technical scheme
    - related task items and any shared coordination assumptions
@@ -51,9 +51,9 @@ Review against four pillars:
 
 ### Pillar 2: Design & Architecture Compliance
 - verify the implementation follows the task-item blueprint in `process.md`
-- confirm consistency with the parent module summary and task relationships in `plan.md`
+- confirm consistency with the parent module summary and task relationships in `process.md` §2
 - check alignment with `architecture.md`
-- if a failure reveals a broken shared assumption, state whether `plan.md`'s module summary or task relationship notes need minimal correction
+- if a failure reveals a broken shared assumption, state whether `process.md` §2's module summary or task relationship notes need minimal correction
 
 ### Pillar 3: Code Quality
 - readability, maintainability, naming, structure
@@ -65,14 +65,27 @@ Review against four pillars:
 - security, performance, data integrity, regression, deployment, and operational risk
 - impact on related task items or downstream modules
 
+### Task-Type-Specific Review Criteria
+
+#### Bugfix
+- **Root cause**: does the implementation fix the root cause or only the symptom? Verify against the design's root cause analysis
+- **Regression risk**: are regression tests included and do they cover the original bug scenario + adjacent edge cases?
+- **Blast radius**: does the fix touch only the minimum necessary code paths?
+
+#### Refactor
+- **Behavior preservation**: does the implementation produce identical output for the same input? Verify the TDD physical evidence includes behavior preservation test results
+- **Interface compatibility**: does the implementation maintain the original interface contract as stated in the design's compatibility notes?
+- **No scope creep**: was nothing added beyond the stated refactoring scope?
+
 ## Verdict & Process Update
 
 Make one of two determinations:
 
 ### PASS
 - all four pillars pass with no blocking issue
-- update `/docs/process.md` to reflect review pass / completion
+- update `docs/process/step-NN.md` under the `## 审阅意见` section to reflect review pass / completion
 - summarize what was verified
+- **For bugfix/refactor tasks only**: proceed to the Rollback Restoration Verification phase below
 
 ### FAIL
 - one or more blocking issues exist
@@ -80,7 +93,7 @@ Make one of two determinations:
   - **设计问题**: the task-item design is flawed or incomplete
   - **开发问题**: the implementation is flawed or incomplete
   - **需求问题**: the requirement baseline is ambiguous or conflicting
-- update `/docs/process.md` under the correct `#### Step X` group in section 4.3 with a **structured defect report** containing:
+- update `docs/process/step-NN.md` under the `## 审阅意见` section with a **structured defect report** containing:
   - **审阅结果**: 不通过
   - **问题分类**: 设计问题 / 开发问题 / 需求问题
   - **缺陷定位**: `file path` -> `class / method / line number` (must be precise enough for the next agent to locate without guessing)
@@ -96,22 +109,51 @@ You are the sole trigger for return loops.
 2. **Design issue**: set status to `review_failed_design`. Flow: `reviewing` -> `review_failed_design` -> `designing` -> `design_done` -> `developing` -> `develop_done` -> `reviewing`.
 3. **Development issue**: set status to `review_failed_dev`. Flow: `reviewing` -> `review_failed_dev` -> `developing` -> `develop_done` -> `reviewing`.
 4. **Cross issue**: handle design issue first (set `review_failed_design`), then re-develop, then re-review.
-5. If a design issue changes shared module assumptions, require a minimal sync to `plan.md`, but do not expand the execution scope beyond the current task item.
-6. Every failure update in `process.md` must include current return-loop count, next step, and actionable guidance.
-7. Section 4 of `process.md` is organized by Step. Each Step has its own `####` heading. Within each Step, each iteration uses a `#####` heading with date. Always prepend new records (latest first) under the correct Step group. Never overwrite history.
+5. If a design issue changes shared module assumptions, require a minimal sync to `process.md` §2, but do not expand the execution scope beyond the current task item.
+6. Every failure update must include current return-loop count, next step, and actionable guidance.
+7. Each per-step file is organized into `## 设计方案`, `## 开发实现`, `## 审阅意见`, `## 回滚与验证记录` sections. Each iteration uses a `#####` heading with date. Always prepend new records (latest first). Never overwrite history.
+
+## Rollback Restoration Verification (Bugfix / Refactor Only)
+
+After a bugfix or refactor task passes review, you must verify whether the impacted original tasks (in `rolled_back` state) can be restored to `done`.
+
+### Verification Steps
+
+1. **Identify impacted tasks**: from the fix task's `影响Step` column in `process.md` §3 and the design's dependency impact analysis in the impacted step files
+2. **Verify each rolled_back task**:
+   - Re-check the original task's acceptance criteria against the current (post-fix) codebase
+   - Confirm the original task's tests still pass
+   - For interface-changed cases: verify each cascaded downstream task individually
+3. **Record verification in process.md §4.4** under each original Step's rollback record:
+   - verification method and result
+   - whether restoration to `done` is approved
+
+### Restoration Decision
+
+| Scenario | Action |
+|---|---|
+| All acceptance criteria still met, tests pass | Original task: `rolled_back` → `done`. Record verification result. |
+| Verification fails (test not passing, criterion not met) | **Auto-create a new incremental fix task** in `process.md` §3 (type=`bugfix`, impact=the failed Step, Step 编号从 25 开始递增). Original task keeps `rolled_back`. Report to user. |
+| Multiple cascaded tasks fail verification | Auto-create **one incremental fix task per failed task**. Report the full list to user. |
+
+### State Machine Rules (Reviewer's Scope — Rollback Restoration)
+- All shared collaboration rules (No Task Hallucination, state machine, rework limits, execution discipline) are defined in `/docs/flow.md` — follow them strictly.
+- **On restoration approved**: set the original task's status from `rolled_back` to `done`, append `"done"` to execution chain
+- **On restoration failed**: keep `rolled_back`, create new incremental task in `process.md` §3
+- **Forbidden**: you must NOT set `rolled_back` tasks to any state other than `done` (on pass) or keep `rolled_back` (on fail)
 
 ## process.md Update Format
 
-When you update `/docs/process.md`, maintain these sections clearly:
+When you update the per-step file and `/docs/process.md`, maintain these sections clearly:
 - **当前战场**
 - **任务项列表**
 - **执行所需信息**
 - **阻塞与需澄清信息**（如有）
 
-Do not use `process.md` to maintain module-level formal design. That shared context belongs in `plan.md`.
+Do not use the per-step file to maintain module-level formal design. That shared context belongs in `process.md` §2.
 
 ### State Machine Rules (Reviewer's Scope)
-- **No Task Hallucination**: Do NOT invent or assume the existence of task items not explicitly written in the `plan.md` tabular lists. Reject any review requests for tasks that are not documented in `plan.md`.
+- All shared collaboration rules (No Task Hallucination, state machine, rework limits, execution discipline) are defined in `/docs/flow.md` — follow them strictly.
 - **Entry state**: `develop_done`
 - **On entry**: set status to `reviewing`, append `"reviewing"` to execution chain
 - **On PASS**: set status to `done`, append `"done"` to execution chain
@@ -119,6 +161,7 @@ Do not use `process.md` to maintain module-level formal design. That shared cont
 - **On FAIL (dev issue)**: set status to `review_failed_dev`, append `"review_failed_dev"` to execution chain
 - **Forbidden**: you must NOT set status to `designing`, `developing`, or any state outside your scope
 - Every status change must also update the execution chain array in the task item list
+- **For bugfix/refactor tasks after PASS**: verify each impacted `rolled_back` task and either restore to `done` or auto-create new incremental fix tasks
 
 ## Quality Standards
 

@@ -1,3 +1,9 @@
+"""
+搜索 Schema 模块
+
+定义 SearXNG 搜索引擎的请求和响应数据结构。
+"""
+
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
@@ -5,7 +11,7 @@ class SearchRequest(BaseModel):
     query: str
     categories: Optional[List[str]] = None
     pageno: int = Field(default=1, ge=1)
-    time_range: Optional[str] = None # day, week, month, year
+    time_range: Optional[str] = None  # day, week, month, year
     timeout: int = Field(default=10, ge=1, le=30)
 
 class SearchResultItem(BaseModel):

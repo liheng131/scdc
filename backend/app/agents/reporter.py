@@ -1,3 +1,18 @@
+"""
+ReporterAgent（报告生成 Agent）
+
+职责：
+- 接收 AnalyzerAgent 的分析结果，组装为结构化 Markdown 报告
+- 按洞察类别（趋势/竞品/机会/风险/综合）分组呈现
+- 为每条洞察附加证据引用标记（[^1]），并生成来源追溯列表
+- 可选生成 ECharts 饼图配置，展示洞察维度分布
+
+为什么使用 Markdown：
+- 跨平台兼容，前端可用 Markdown 渲染库展示
+- 纯文本便于版本控制和差异对比
+- 支持导出为 PDF/HTML 等格式
+"""
+
 import datetime
 import logging
 from typing import List, Dict, Any, Tuple
@@ -16,7 +31,13 @@ class ReporterAgent:
         }
 
     def _build_evidence_map(self, insights: List[Insight]) -> Tuple[Dict[str, int], List[str]]:
-        # Map each unique URI to a footnote index [^1], [^2], etc.
+        """
+        为每条唯一 URI 分配脚注编号 [^1], [^2], ...
+
+        为什么使用脚注：
+        - Markdown 原生支持脚注语法 [^1]
+        - 让读者可以快速在报告底部找到证据来源的原始链接
+        """
         evidence_map: Dict[str, int] = {}
         reference_list: List[str] = []
         idx = 1
@@ -29,7 +50,13 @@ class ReporterAgent:
         return evidence_map, reference_list
 
     def _generate_chart_configs(self, topic: str, insights: List[Insight]) -> List[Dict[str, Any]]:
-        # Generate an ECharts standard configuration based on insight category distribution
+        """
+        根据洞察类别分布生成 ECharts 饼图配置
+
+        为什么输出配置而非图片：
+        - 前端可直接传入 ECharts 实例渲染，交互式图表体验更好
+        - 不依赖服务端渲染库，保持后端轻量化
+        """
         cat_counts: Dict[str, int] = {}
         for insight in insights:
             cat = insight.category if insight.category in self.category_names else "general"
@@ -68,6 +95,13 @@ class ReporterAgent:
         return [option]
 
     async def execute(self, input_data: ReporterInput) -> ReporterOutput:
+        """
+        组装最终分析报告，包含四个章节：
+        ① 报告元数据（标题、时间、数据来源）
+        ② 执行摘要（LLM 生成的全局概述）
+        ③ 核心洞察（按类别分组 + 证据引用）
+        ④ 来源追溯（脚注列表，包含原始链接）
+        """
         logger.info(f"ReporterAgent started for task '{input_data.task_id}', topic '{input_data.topic}'")
 
         ao = input_data.analyzer_output
@@ -77,18 +111,18 @@ class ReporterAgent:
         sections: List[ReportSection] = []
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Section 1: Title & Metadata
+        # 章节 1: 报告元数据
         header_md = f"# 深度市场洞察报告：{input_data.topic}\n\n" \
                     f"> **执行时间**: {now_str}  \n" \
                     f"> **数据来源**: 全网多渠道汇聚清洗  \n" \
                     f"> **分析引擎**: SCDC AI Agent System\n"
         sections.append(ReportSection(title="报告元数据", content=header_md))
 
-        # Section 2: Executive Summary
+        # 章节 2: 执行摘要
         exec_md = f"## 📑 执行摘要 (Executive Summary)\n\n{ao.summary}\n"
         sections.append(ReportSection(title="执行摘要", content=exec_md))
 
-        # Section 3: Categorized Insights
+        # 章节 3: 按类别分组的核心洞察（带置信度和证据引用）
         categories_dict: Dict[str, List[Insight]] = {}
         for insight in insights:
             cat = insight.category if insight.category in self.category_names else "general"
@@ -99,10 +133,9 @@ class ReporterAgent:
             cat_insights = categories_dict.get(cat_key, [])
             if not cat_insights:
                 continue
-            
+
             insights_md_parts.append(f"### {cat_label}\n")
             for ci in cat_insights:
-                # Append footnotes
                 footnote_tags = "".join([f"[^{evidence_map[uri]}]" for uri in ci.evidence if uri in evidence_map])
                 conf_badge = f" `置信度: {ci.confidence:.1%}`" if ci.confidence > 0 else ""
                 insights_md_parts.append(f"- **{ci.conclusion}**{conf_badge} {footnote_tags}\n")
@@ -111,18 +144,18 @@ class ReporterAgent:
         insights_md = "\n".join(insights_md_parts)
         sections.append(ReportSection(title="核心洞察", content=insights_md))
 
-        # Section 4: References & Footnotes
+        # 章节 4: 来源与证据追踪
         ref_parts = ["## 🔗 来源与证据追踪 (References)\n"]
         for idx, uri in enumerate(reference_list, 1):
             ref_parts.append(f"[^{idx}]: [{uri}]({uri})")
-        
+
         ref_md = "\n".join(ref_parts) + "\n"
         sections.append(ReportSection(title="来源追溯", content=ref_md))
 
-        # Combine Full Markdown
+        # 合并为完整 Markdown
         full_markdown = "\n".join([sec.content for sec in sections])
 
-        # Generate Chart Configs if requested
+        # 按需生成图表配置
         chart_configs = self._generate_chart_configs(input_data.topic, insights) if input_data.include_charts and insights else []
 
         logger.info(f"ReporterAgent successfully generated report for '{input_data.task_id}' ({len(full_markdown)} chars)")

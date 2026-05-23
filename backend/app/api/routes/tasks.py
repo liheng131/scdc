@@ -1,3 +1,14 @@
+"""
+分析任务（Tasks）API 路由
+
+提供任务 CRUD、任务运行记录管理、手动触发运行等端点。
+
+权限设计：
+- 管理员可查看所有任务
+- 普通用户只能查看和操作自己创建的任务
+- 所有端点均需登录认证
+"""
+
 from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +27,7 @@ async def create_task(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """创建新的分析任务"""
     task = await task_service.create_task(session, request, current_user.id)
     return success_response(data=task)
 
@@ -26,7 +38,7 @@ async def list_tasks(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
-    # Non-admin sees only their own tasks
+    """获取任务列表：管理员看全部，普通用户只看自己的"""
     user_filter = current_user.id if current_user.role != "admin" else None
     tasks = await task_service.list_tasks(session, user_id=user_filter, skip=skip, limit=limit)
     return success_response(data=tasks)
@@ -37,6 +49,7 @@ async def get_task(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """获取单个任务详情（非管理员或非创建者返回 403）"""
     task = await task_service.get_task(session, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -51,6 +64,7 @@ async def update_task(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """更新任务配置"""
     task = await task_service.get_task(session, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -65,6 +79,7 @@ async def delete_task(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """删除任务"""
     task = await task_service.get_task(session, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -80,6 +95,7 @@ async def create_task_run(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """为任务创建一次运行记录"""
     task = await task_service.get_task(session, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -96,6 +112,7 @@ async def trigger_task_run(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
+    """手动触发一次任务执行（立即创建一个 collecting 状态的运行记录）"""
     task = await task_service.get_task(session, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
