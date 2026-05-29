@@ -1,83 +1,21 @@
 <script setup lang="ts">
-/**
- * 系统设置页面
- *
- * 管理 LLM 推理引擎参数、自动化调度和通知分发配置。
- *
- * 为什么使用 el-divider 分区：
- * - 系统配置可分为 AI 模型参数和调度分发通道两大类
- * - el-divider 的 content-position="left" 提供清晰的视觉分隔，用户快速定位配置项
- *
- * 为什么 API Key 使用 type="password" + show-password：
- * - 敏感凭据默认掩码显示，show-password 提供手动查看的灵活性
- * - 前端不持久化 API Key（real-time reactive），符合安全最佳实践
- *
- * 为什么 temperature 使用 el-slider 而非 el-input-number：
- * - Temperature 范围固定为 [0, 1]，滑块更直观地展示"严谨 vs 发散"的调节语义
- * -滑块拖动操作效率高，比输入数字更符合管理层用户的配置习惯
- */
-import { reactive } from 'vue';
-import { ElMessage } from 'element-plus';
-import { Check } from '@element-plus/icons-vue';
+import { ref } from 'vue';
+import AiModelsView from './AiModelsView.vue';
+import DispatchView from './DispatchView.vue';
 
-const config = reactive({
-  llmProvider: 'deepseek',
-  apiKey: 'sk-98a7cf810b1a409f8c12a7b890123ef4',
-  maxTokens: 4096,
-  temperature: 0.3,
-  cronSchedule: '0 8 * * *',
-  notificationEmail: 'executive@market-insight.internal',
-  webhookUrl: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e0b...c31',
-});
-
-const handleSave = () => {
-  ElMessage.success('系统配置与底层大模型密钥更新成功');
-};
+const activeTab = ref('ai-models');
 </script>
 
 <template>
   <div class="settings-container">
-    <el-card shadow="never" class="settings-card">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">系统底层参数与大模型环境配置</span>
-          <el-button type="primary" :icon="Check" @click="handleSave">保存变更</el-button>
-        </div>
-      </template>
-
-      <el-form :model="config" label-width="180px" class="settings-form">
-        <el-divider content-position="left">AI 大模型推理引擎配置 (LLM Base)</el-divider>
-        <el-form-item label="模型供应商 (Provider)">
-          <el-select v-model="config.llmProvider" style="width: 360px">
-            <el-option label="DeepSeek R1 / V3 深度推理模型" value="deepseek" />
-            <el-option label="Kimi Moonshot 长文本分析引擎" value="kimi" />
-            <el-option label="本地私有化部署 Llama-3 (vLLM)" value="local" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="API Key">
-          <el-input v-model="config.apiKey" type="password" show-password style="width: 360px" />
-        </el-form-item>
-        <el-form-item label="最大生成长度 (Tokens)">
-          <el-input-number v-model="config.maxTokens" :min="1024" :max="32768" :step="1024" />
-        </el-form-item>
-        <el-form-item label="分析温度值 (Temperature)">
-          <el-slider v-model="config.temperature" :min="0" :max="1" :step="0.1" style="width: 360px" />
-          <span class="tip-text">当前设定: {{ config.temperature }} (数值越低逻辑推导越严谨)</span>
-        </el-form-item>
-
-        <el-divider content-position="left">自动化调度与分发通道 (Dispatch & Pipeline)</el-divider>
-        <el-form-item label="默认全局轮询表达式">
-          <el-input v-model="config.cronSchedule" style="width: 360px" />
-          <span class="tip-text" style="margin-left: 12px">每天上午 8:00 执行全网数据源汇编</span>
-        </el-form-item>
-        <el-form-item label="高管团队接收邮箱">
-          <el-input v-model="config.notificationEmail" style="width: 360px" />
-        </el-form-item>
-        <el-form-item label="企业微信 Webhook 机器人">
-          <el-input v-model="config.webhookUrl" style="width: 480px" />
-        </el-form-item>
-      </el-form>
-    </el-card>
+    <el-tabs v-model="activeTab" type="border-card">
+      <el-tab-pane label="AI 模型配置" name="ai-models">
+        <AiModelsView />
+      </el-tab-pane>
+      <el-tab-pane label="自动化调度与分发通道" name="dispatch">
+        <DispatchView />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 

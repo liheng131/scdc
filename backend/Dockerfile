@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc build-essen
 
 COPY requirements.txt .
 # 将依赖编译为 wheels 格式，避免运行时重复编译
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /app/wheels -r requirements.txt
 
 # ===== 运行阶段 =====
 FROM python:3.11-slim

@@ -44,22 +44,24 @@ const router = createRouter({
           meta: { title: '仪表盘 Dashboard' },
         },
         {
+          path: 'workflow',
+          name: 'workflow',
+          component: () => import('../views/WorkflowView.vue'),
+          meta: { title: '智能体工作流 Workflow' },
+        },
+        {
           path: 'data-sources',
-          name: 'data-sources',
-          component: () => import('../views/DataSourcesView.vue'),
-          meta: { title: '数据源管理 Data Sources' },
+          redirect: '/workflow',
         },
         {
           path: 'tasks',
-          name: 'tasks',
-          component: () => import('../views/TasksView.vue'),
-          meta: { title: '分析任务管理 Tasks' },
+          redirect: '/workflow',
         },
         {
           path: 'reports',
           name: 'reports',
           component: () => import('../views/ReportsView.vue'),
-          meta: { title: '智能研报中心 Reports' },
+          meta: { title: '智能报告 Reports' },
         },
         {
           path: 'templates',

@@ -22,7 +22,6 @@ import { useAuthStore } from '../../stores/auth';
 import {
   House,
   DataLine,
-  List,
   Document,
   Collection,
   Setting,
@@ -65,21 +64,17 @@ const handleLogout = () => {
           <el-icon><House /></el-icon>
           <template #title>仪表盘 Dashboard</template>
         </el-menu-item>
-        <el-menu-item index="/data-sources">
+        <el-menu-item index="/workflow">
           <el-icon><DataLine /></el-icon>
-          <template #title>数据源管理 Data Sources</template>
-        </el-menu-item>
-        <el-menu-item index="/tasks">
-          <el-icon><List /></el-icon>
-          <template #title>分析任务 Tasks</template>
-        </el-menu-item>
-        <el-menu-item index="/reports">
-          <el-icon><Document /></el-icon>
-          <template #title>智能研报 Reports</template>
+          <template #title>智能体工作流 Workflow</template>
         </el-menu-item>
         <el-menu-item index="/templates">
           <el-icon><Collection /></el-icon>
           <template #title>大纲模板 Templates</template>
+        </el-menu-item>
+        <el-menu-item index="/reports">
+          <el-icon><Document /></el-icon>
+          <template #title>智能报告 Reports</template>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>

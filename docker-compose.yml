@@ -24,6 +24,8 @@ volumes:
   minio_data:       # MinIO 对象存储文件
   opensearch_data:  # OpenSearch 索引数据
   milvus_data:      # Milvus 向量数据库文件
+  etcd_data:        # etcd 键值存储（Milvus 依赖）
+  minio_milvus_data: # MinIO 对象存储（Milvus 依赖）
   prom_data:        # Prometheus 监控数据
   grafana_data:     # Grafana 面板配置
 
@@ -109,6 +111,41 @@ services:
       - scdc_net
     restart: unless-stopped
 
+  # etcd：键值存储，Milvus 元数据协调器
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: scdc_etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
+  # MinIO 对象存储（Milvus 依赖）
+  minio_milvus:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: scdc_minio_milvus
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_milvus_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
   # Milvus：向量数据库，用于语义搜索和相似度匹配
   milvus:
     image: milvusdb/milvus:v2.4.0
@@ -117,9 +154,14 @@ services:
     environment:
       ETCD_USE_EMBED: "true"
       ETCD_DATA_DIR: "/var/lib/milvus/etcd"
+      COMMON_STORAGETYPE: "local"
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "19530:19530"
       - "9091:9091"
+    cap_add:
+      - SYS_PTRACE
     volumes:
       - milvus_data:/var/lib/milvus
     networks:

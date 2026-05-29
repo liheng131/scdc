@@ -12,7 +12,7 @@ import apiClient, { type ApiResponse } from '../client';
 
 export interface ReportInfo {
   id: number;
-  task_id: number;
+  task_id: string;
   title: string;
   version: string;
   status: string;
@@ -22,14 +22,29 @@ export interface ReportInfo {
   updated_at: string;
 }
 
+export interface ReportStatisticsItem {
+  label: string;
+  count: number;
+}
+
+export interface ReportStatisticsResponse {
+  period: string;
+  items: ReportStatisticsItem[];
+}
+
 export const reportsApi = {
-  getReports: async (params?: { task_id?: number; q?: string; skip?: number; limit?: number }): Promise<ApiResponse<ReportInfo[]>> => {
+  getReports: async (params?: { task_id?: string; q?: string; skip?: number; limit?: number }): Promise<ApiResponse<ReportInfo[]>> => {
     const res = await apiClient.get('/api/v1/reports', { params });
     return res.data;
   },
 
   getReportDetail: async (id: number): Promise<ApiResponse<ReportInfo>> => {
     const res = await apiClient.get(`/api/v1/reports/${id}`);
+    return res.data;
+  },
+
+  createFromWorkflow: async (data: { task_id: string; title: string; content_markdown?: string; summary?: string }): Promise<ApiResponse<ReportInfo>> => {
+    const res = await apiClient.post('/api/v1/reports/create-from-workflow', data);
     return res.data;
   },
 
@@ -42,5 +57,22 @@ export const reportsApi = {
     const token = localStorage.getItem('token') || '';
     const base = import.meta.env.VITE_API_BASE_URL || '';
     return `${base}/api/v1/reports/${id}/export?fmt=${fmt}&token=${token}`;
+  },
+
+  getStatistics: async (params: { period: 'day' | 'week' | 'month' | 'year'; report_type?: string; status?: string; limit?: number }): Promise<ApiResponse<ReportStatisticsResponse>> => {
+    const res = await apiClient.get('/api/v1/reports/statistics', { params });
+    return res.data;
+  },
+
+  uploadReport: async (file: File, title?: string): Promise<ApiResponse<ReportInfo>> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (title) {
+      formData.append('title', title);
+    }
+    const res = await apiClient.post('/api/v1/reports/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return res.data;
   },
 };

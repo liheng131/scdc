@@ -72,14 +72,16 @@ class CleanerOutput(BaseModel):
 
 class Insight(BaseModel):
     conclusion: str
-    evidence: List[str]  # 证据来源 URI 列表
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    category: str = Field(default="general")  # trend / competitor / risk / opportunity / general
+    analysis: str = ""
+    evidence: List[str] = []
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    dimension: str = Field(default="")
 
 class AnalyzerInput(BaseModel):
     task_id: str
     topic: str
     cleaned_items: List[CleanedItem]
+    dimensions: List[str] = Field(default_factory=lambda: ["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"])
 
 class AnalyzerOutput(BaseModel):
     task_id: str
@@ -97,6 +99,8 @@ class ReporterInput(BaseModel):
     topic: str
     analyzer_output: AnalyzerOutput
     include_charts: bool = True
+    source_contents: List[Dict[str, Any]] = []
+    dimensions: List[str] = Field(default_factory=list)
 
 class ReportSection(BaseModel):
     title: str
@@ -120,6 +124,7 @@ class OrchestratorInput(BaseModel):
     max_items: int = Field(default=5, ge=1, le=20)
     min_content_length: int = 20
     include_charts: bool = True
+    dimensions: List[str] = Field(default_factory=list)
 
 class OrchestratorOutput(BaseModel):
     task_id: str

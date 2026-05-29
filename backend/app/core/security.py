@@ -4,6 +4,7 @@
 职责：
 - 密码哈希与验证（bcrypt 算法）
 - JWT（JSON Web Token）令牌生成
+- API Key 对称加密存储
 
 选择 bcrypt 的原因：
 - 内置盐值（salt），无需额外管理
@@ -15,12 +16,36 @@ from datetime import datetime, timedelta
 from typing import Any, Union
 from passlib.context import CryptContext
 import jwt
+from cryptography.fernet import Fernet
 from app.core.config import settings
 
 # 密码哈希上下文：使用 bcrypt，自动标记旧算法为"弃用"以便渐进式迁移
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 ALGORITHM = settings.jwt_algorithm
+
+
+def _get_fernet() -> Fernet:
+    key = settings.secret_key.encode("utf-8")[:32].ljust(32, b"0")
+    return Fernet(key.encode("base64") if hasattr(key, "encode") else __import__("base64").b64encode(key))
+
+
+def encrypt_api_key(plain: str) -> str:
+    if not plain:
+        return ""
+    import base64
+    key = settings.secret_key.encode("utf-8")[:32].ljust(32, b"\0")
+    f = Fernet(base64.urlsafe_b64encode(key))
+    return f.encrypt(plain.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_api_key(encrypted: str) -> str:
+    if not encrypted:
+        return ""
+    import base64
+    key = settings.secret_key.encode("utf-8")[:32].ljust(32, b"\0")
+    f = Fernet(base64.urlsafe_b64encode(key))
+    return f.decrypt(encrypted.encode("utf-8")).decode("utf-8")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """验证明文密码与数据库中哈希值是否匹配"""

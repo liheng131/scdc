@@ -44,3 +44,48 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
+
+async def migrate_task_id_column() -> None:
+    """Migrate reports.task_id from integer to varchar(50) if needed."""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            result = await conn.execute(text("""
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'reports' AND column_name = 'task_id'
+            """))
+            row = result.fetchone()
+            if row:
+                col_type = row[0]
+                if col_type in ('integer', 'bigint', 'int4', 'int8'):
+                    logger.info(f"Detected reports.task_id as {col_type}, migrating to varchar(50)...")
+
+                    await conn.execute(text("""
+                        ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_task_id_fkey
+                    """))
+
+                    await conn.execute(text("""
+                        ALTER TABLE reports
+                        ALTER COLUMN task_id TYPE VARCHAR(50)
+                        USING task_id::text
+                    """))
+
+                    await conn.execute(text("""
+                        ALTER TABLE reports
+                        ALTER COLUMN task_id DROP DEFAULT
+                    """))
+
+                    await conn.execute(text("""
+                        ALTER TABLE reports
+                        ALTER COLUMN task_id DROP NOT NULL
+                    """))
+
+                    logger.info("Successfully migrated reports.task_id to varchar(50)")
+                else:
+                    logger.info(f"reports.task_id is already {col_type}, no migration needed")
+            else:
+                logger.info("reports.task_id column not found, skipping migration")
+    except Exception:
+        logger.exception("Failed to migrate reports.task_id column, continuing...")

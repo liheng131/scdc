@@ -12,7 +12,7 @@ COPY package*.json ./
 RUN npm install -g pnpm && pnpm install
 
 COPY . .
-RUN npm install -g pnpm && pnpm build
+RUN pnpm build
 
 # ===== 运行阶段 =====
 # 使用 Nginx 提供静态资源，同时配置反向代理到后端 API

@@ -14,6 +14,7 @@ from app.models.report import Report
 from app.models.template import Template
 from app.models.notification import NotificationRule
 from app.models.event_rule import EventRule
+from app.models.ai_model_config import AiModelConfig
 
 __all__ = [
     "Base",
@@ -26,5 +27,6 @@ __all__ = [
     "Report",
     "Template",
     "NotificationRule",
-    "EventRule"
+    "EventRule",
+    "AiModelConfig"
 ]

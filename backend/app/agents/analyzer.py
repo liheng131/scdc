@@ -17,84 +17,143 @@ AnalyzerAgent（AI 分析 Agent）
 
 import json
 import logging
+import re
+import traceback
 import httpx
 from typing import List, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.schemas.agent import AnalyzerInput, AnalyzerOutput, Insight, CleanedItem
 from app.core.config import settings
+from app.core.runtime_config import rumtime_config
+from app.services.embedding import EmbeddingService
+from app.services.vectorstore import VectorStoreService
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_text(text: str, max_len: int = 300) -> str:
+    text = re.sub(r'[^\x20-\x7E\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\n\r\t]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:max_len]
+
+
 class AnalyzerAgent:
     def __init__(self):
-        self.llm_provider = settings.llm_provider
-        self.default_model = settings.default_model
-        
+        self.llm_provider = rumtime_config.get("llm_provider")
+        self.default_model = rumtime_config.get("default_model")
+        self.llm_base_url = rumtime_config.get("llm_base_url")
+        self.llm_api_key = settings.llm_api_key
+        self._db_config_loaded = False
+
+        self._build_llm_config()
+
+    def _build_llm_config(self):
         if self.llm_provider == "gpustack":
-            self.llm_url = f"{settings.ollama_base_url.rstrip('/')}/v1/chat/completions"
+            self.llm_url = f"{self.llm_base_url.rstrip('/')}/v1/chat/completions"
             self.headers = {
-                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Authorization": f"Bearer {self.llm_api_key}",
                 "Content-Type": "application/json",
             }
         else:
-            self.llm_url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
+            self.llm_url = f"{self.llm_base_url.rstrip('/')}/api/generate"
             self.headers = {}
 
-    def _build_prompt(self, topic: str, items: List[CleanedItem]) -> str:
-        """
-        构建发送给 LLM 的分析 Prompt
+    async def _ensure_db_config(self):
+        if self._db_config_loaded:
+            return
+        self._db_config_loaded = True
+        try:
+            db_config = await rumtime_config.get_default_model_config("llm")
+            if db_config:
+                self.llm_provider = db_config["provider"].lower() if db_config["provider"] else self.llm_provider
+                self.default_model = db_config["model_name"] or self.default_model
+                if db_config["base_url"]:
+                    self.llm_base_url = db_config["base_url"]
+                if db_config["api_key"]:
+                    self.llm_api_key = db_config["api_key"]
+                self._build_llm_config()
+        except Exception:
+            pass
 
-        为什么要求输出 JSON 格式：
-        - 便于程序化解析和校验（按 schema 验证必填字段）
-        - JSON 结构化输出比纯文本更易于后续 Reporter 阶段组装报告
-        """
+    def _build_prompt(self, topic: str, items: List[CleanedItem], dimensions: List[str], context_snippets: List[str] = None) -> str:
         context_parts = []
         for i, item in enumerate(items):
-            context_parts.append(f"[Source #{i+1} | URI: {item.source_uri} | Title: {item.title}]\nSummary: {item.summary}")
+            full_text = "\n".join(item.content_chunks) if item.content_chunks else item.summary
+            if len(full_text) > 1500:
+                full_text = full_text[:1500] + "..."
+            context_parts.append(
+                f"--- Source #{i+1} ---\n"
+                f"URI: {item.source_uri}\n"
+                f"Title: {item.title}\n"
+                f"Content:\n{full_text}\n"
+            )
 
-        context_str = "\n\n".join(context_parts)
-        prompt = f"""You are an expert market analyst. Based on the provided context sources, analyze the topic: '{topic}'.
-Extract deep insights and format your response strictly as a JSON object matching this schema:
+        context_str = "\n".join(context_parts)
+
+        dim_labels = "\n".join(f"  - {d}" for d in dimensions)
+        dim_slots = ", ".join(f'"{d}"' for d in dimensions)
+
+        historical_section = ""
+        if context_snippets:
+            snippets_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(context_snippets))
+            historical_section = f"""## 历史相关报告背景
+以下是之前相关报告中的关键背景信息片段，可用于了解历史上下文和趋势：
+{snippets_str}
+
+"""
+
+        prompt = f"""You are a senior market intelligence analyst with decades of experience at a top-tier consulting firm.
+
+Your task: produce a deep, insightful analysis of the topic "{topic}" based on the source materials below.
+
+The analysis MUST be structured into the following dimensions (do NOT use any other dimension labels):
+{dim_labels}
+
+{historical_section}REQUIREMENTS:
+1. Write a substantive executive summary (200-400 words) that synthesizes findings into a coherent narrative, covering ALL the dimensions above. Include key numbers, specific company names, and directional trends where available.
+2. For EACH dimension above, extract 1-3 insights. Total 5-8 insights across all dimensions. For EACH insight:
+   - "conclusion": a one-sentence headline
+   - "analysis": 2-4 sentence deep dive explaining the evidence, implications, and why it matters (80-150 words)
+   - "evidence": URIs from the sources that support this insight
+   - "confidence": your certainty level (0.0-1.0)
+   - "dimension": MUST be exactly one of [{dim_slots}]
+3. Cross-reference sources where possible - if two sources reinforce the same finding, mention that in the analysis.
+4. Be specific and data-driven. Avoid vague generalities like "the market is growing."
+5. Every dimension listed above MUST have at least one insight. Do not leave any dimension uncovered.
+
+Output strictly as JSON, no markdown:
 {{
-  "summary": "High level executive summary of the findings (approx 100-200 words)",
+  "summary": "detailed executive summary covering all dimensions above (200-400 words)",
   "insights": [
     {{
-      "conclusion": "Clear, standalone analytical takeaway",
-      "evidence": ["http://uri-of-source-1", "http://uri-of-source-2"],
-      "confidence": 0.95,
-      "category": "trend" // choose from 'trend', 'competitor', 'risk', 'opportunity', 'general'
+      "conclusion": "one-sentence headline",
+      "analysis": "2-4 sentence deep-dive with evidence, implications, significance (80-150 words)",
+      "evidence": ["uri1", "uri2"],
+      "confidence": 0.92,
+      "dimension": "{dimensions[0] if dimensions else ''}"
     }}
   ]
 }}
 
-Context Sources:
-{context_str}
-
-IMPORTANT: Ensure valid JSON output only without markdown formatting or extra commentary. Every evidence entry must match one of the provided Source URIs."""
+SOURCE MATERIALS:
+{context_str}"""
         return prompt
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(1),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException, json.JSONDecodeError)),
+        retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, json.JSONDecodeError)),
         reraise=True
     )
-    async def _call_llm(self, prompt: str, timeout: int = 30) -> Dict[str, Any]:
-        """
-        调用 LLM API 发送 Prompt 并解析 JSON 响应
-
-        为什么使用指数退避重试：
-        - LLM 服务可能在 GPU 占用高峰期暂时无法响应
-        - 指数退避给服务留出恢复时间，避免雪崩效应
-        """
+    async def _call_llm(self, prompt: str, timeout: int = 60) -> Dict[str, Any]:
         if self.llm_provider == "gpustack":
             payload = {
                 "model": self.default_model,
                 "messages": [
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
+                "temperature": rumtime_config.get("temperature"),
+                "max_tokens": rumtime_config.get("max_tokens"),
             }
         else:
             payload = {
@@ -102,7 +161,7 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
                 "prompt": prompt,
                 "format": "json",
                 "stream": False,
-                "options": {"temperature": 0.2}
+                "options": {"temperature": rumtime_config.get("temperature")}
             }
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -111,35 +170,48 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
             data = resp.json()
             
             if self.llm_provider == "gpustack":
-                response_text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                response_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             else:
-                response_text = data.get("response", "{}")
+                response_text = data.get("response", "")
             
+            response_text = self._clean_json_response(response_text)
+            if not response_text:
+                raise json.JSONDecodeError("Empty response after cleaning", "", 0)
             return json.loads(response_text)
 
-    def _rule_based_degradation(self, input_data: AnalyzerInput) -> AnalyzerOutput:
-        """
-        LLM 不可用时的降级分析逻辑
+    def _clean_json_response(self, text: str) -> str:
+        text = text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return text.strip()
 
-        为什么这样降级：
-        - 将每条清洗后的数据直接转换为一条 insight，确保不丢失信息
-        - 虽然缺少 LLM 的深度分析能力，但仍能产出结构化的报告供人工审阅
-        """
-        logger.warning(f"Ollama LLM unreachable or failed for task '{input_data.task_id}'. Degrading to rule-based analysis.")
+    def _rule_based_degradation(self, input_data: AnalyzerInput) -> AnalyzerOutput:
+        logger.warning(f"LLM unreachable or failed for task '{input_data.task_id}'. Degrading to rule-based analysis.")
         insights = []
         summary_parts = []
+        fallback_dim = input_data.dimensions[0] if input_data.dimensions else ""
+        dims = input_data.dimensions if input_data.dimensions else ["综合分析"]
 
-        for item in input_data.cleaned_items:
+        for idx, item in enumerate(input_data.cleaned_items):
             summary_parts.append(item.title)
-            conclusion = f"Key observation from {item.title}: {item.summary[:100]}..."
+            full_text = "\n".join(item.content_chunks) if item.content_chunks else item.summary
+            safe_summary = _sanitize_text(item.summary, 200)
+            safe_content = _sanitize_text(full_text, 300)
+            dim = dims[idx % len(dims)]
+            analysis = safe_content if safe_content else f"Source '{item.title}' provides relevant information."
             insights.append(Insight(
-                conclusion=conclusion,
+                conclusion=safe_summary[:80] if safe_summary else f"Key finding from {item.title}",
+                analysis=analysis,
                 evidence=[item.source_uri],
                 confidence=0.8,
-                category="general"
+                dimension=dim
             ))
 
-        combined_summary = f"Degraded Analysis Summary for '{input_data.topic}': Found {len(input_data.cleaned_items)} relevant sources including " + ", ".join(summary_parts[:3]) + "."
+        combined_summary = f"Analysis Summary for '{input_data.topic}': Found {len(input_data.cleaned_items)} relevant sources including {', '.join(summary_parts[:3])}. {len(input_data.cleaned_items)} key observations were extracted for further review."
         return AnalyzerOutput(
             task_id=input_data.task_id,
             success=True,
@@ -148,13 +220,7 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
         )
 
     async def execute(self, input_data: AnalyzerInput) -> AnalyzerOutput:
-        """
-        执行分析流程：
-        1. 构建 Prompt 并调用 LLM
-        2. 从 LLM 响应中提取 summary 和 insights
-        3. 校验 evidence URI 的有效性（只保留已采集到的来源）
-        4. LLM 调用失败时自动降级为规则分析
-        """
+        await self._ensure_db_config()
         logger.info(f"AnalyzerAgent started for task_id: {input_data.task_id}, topic: '{input_data.topic}'")
 
         if not input_data.cleaned_items:
@@ -166,7 +232,23 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
                 insights=[]
             )
 
-        prompt = self._build_prompt(input_data.topic, input_data.cleaned_items)
+        context_snippets = []
+        try:
+            vectorstore = VectorStoreService()
+            if vectorstore.collection_exists():
+                embedding_service = EmbeddingService()
+                embeddings = await embedding_service.embed_texts_or_empty([input_data.topic])
+                if embeddings and embeddings[0]:
+                    hits = vectorstore.search(embeddings[0], top_k=3)
+                    for hit in hits:
+                        text = hit.get("text", "")
+                        if text:
+                            context_snippets.append(text)
+                    logger.info(f"Retrieved {len(context_snippets)} historical context snippets for topic '{input_data.topic}'")
+        except Exception as e:
+            logger.warning(f"Failed to retrieve vector context for topic '{input_data.topic}': {e}")
+
+        prompt = self._build_prompt(input_data.topic, input_data.cleaned_items, input_data.dimensions, context_snippets if context_snippets else None)
         try:
             llm_result = await self._call_llm(prompt)
             summary = llm_result.get("summary", f"Analysis summary for {input_data.topic}")
@@ -174,23 +256,34 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
 
             validated_insights = []
             valid_uris = {item.source_uri for item in input_data.cleaned_items}
+            valid_dims = set(input_data.dimensions)
 
             for ri in raw_insights:
                 conclusion = ri.get("conclusion", "")
+                analysis = ri.get("analysis", "")
                 evidence = ri.get("evidence", [])
                 confidence = float(ri.get("confidence", 0.8))
-                category = ri.get("category", "general")
+                dimension = ri.get("dimension", ri.get("category", ""))
 
-                # 过滤合法的 evidence URI，只保留已采集的来源
+                if dimension and dimension not in valid_dims and valid_dims:
+                    dim_lower = dimension.strip().lower()
+                    for vd in valid_dims:
+                        if vd.lower() == dim_lower or vd.lower().startswith(dim_lower[:4]) or dim_lower.startswith(vd.lower()[:4]):
+                            dimension = vd
+                            break
+                    else:
+                        dimension = list(valid_dims)[0]
+
                 clean_evidence = [e for e in evidence if e in valid_uris]
-                if not clean_evidence and valid_uris:  # 匹配失败时回退到第一个有效 URI
+                if not clean_evidence and valid_uris:
                     clean_evidence = [list(valid_uris)[0]]
 
                 validated_insights.append(Insight(
                     conclusion=conclusion,
+                    analysis=analysis,
                     evidence=clean_evidence,
-                    confidence=max(0.0, min(1.0, confidence)),  # 将置信度钳制在 [0, 1]
-                    category=category
+                    confidence=max(0.0, min(1.0, confidence)),
+                    dimension=dimension
                 ))
 
             return AnalyzerOutput(
@@ -200,5 +293,5 @@ IMPORTANT: Ensure valid JSON output only without markdown formatting or extra co
                 insights=validated_insights
             )
         except Exception as e:
-            logger.error(f"AnalyzerAgent LLM execution failed: {str(e)}")
+            logger.error(f"AnalyzerAgent LLM execution failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             return self._rule_based_degradation(input_data)

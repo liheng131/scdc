@@ -24,7 +24,9 @@ from app.api.router import api_router
 from contextlib import asynccontextmanager
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.services.scheduler import SchedulerService
-from app.core.db import async_session_factory
+from app.services.vectorstore import VectorStoreService
+from app.core.db import async_session_factory, migrate_task_id_column, engine
+from app.models.base import Base
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,9 +38,63 @@ scheduler = SchedulerService(async_session_factory=async_session_factory)
 async def lifespan(app: FastAPI):
     """
     FastAPI 生命周期管理器（asynccontextmanager 模式）
-    - 启动阶段：启动 Cron 定时任务调度循环，每分钟扫描一次待执行任务
+    - 启动阶段：执行数据库迁移，启动 Cron 定时任务调度循环，每分钟扫描一次待执行任务
     - 关闭阶段：优雅停止调度循环，避免任务中断
     """
+    logger.info("Running database migrations...")
+    await migrate_task_id_column()
+    logger.info("Initializing AI model configs table...")
+    try:
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_model_configs (
+                    id SERIAL PRIMARY KEY,
+                    provider VARCHAR(100) NOT NULL DEFAULT '',
+                    model_name VARCHAR(255) NOT NULL DEFAULT '',
+                    model_type VARCHAR(20) NOT NULL DEFAULT 'llm',
+                    base_url VARCHAR(500) NOT NULL DEFAULT '',
+                    api_key TEXT NOT NULL DEFAULT '',
+                    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_ai_model_configs_model_type
+                ON ai_model_configs (model_type)
+            """))
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_ai_model_configs_is_default
+                ON ai_model_configs (is_default)
+            """))
+            result = await conn.execute(text("SELECT COUNT(*) FROM ai_model_configs"))
+            count = result.scalar() or 0
+            if count == 0:
+                from app.core.runtime_config import rumtime_config
+                rumtime_config._ensure_loaded()
+                provider = rumtime_config.get("llm_provider", "")
+                base_url = rumtime_config.get("llm_base_url", "")
+                api_key = rumtime_config.get("llm_api_key", "")
+                model_name = rumtime_config.get("default_model", "")
+                from app.core.security import encrypt_api_key
+                encrypted_key = encrypt_api_key(api_key)
+                await conn.execute(
+                    text("""
+                        INSERT INTO ai_model_configs (provider, model_name, model_type, base_url, api_key, is_default)
+                        VALUES (:provider, :model_name, 'llm', :base_url, :api_key, TRUE)
+                    """),
+                    {"provider": provider, "model_name": model_name, "base_url": base_url, "api_key": encrypted_key}
+                )
+                logger.info("Migrated existing LLM config to ai_model_configs table")
+    except Exception as e:
+        logger.warning("Failed to initialize ai_model_configs: %s", e)
+    logger.info("Initializing vector store...")
+    try:
+        vectorstore = VectorStoreService()
+        vectorstore.init_collection(dim=768)
+    except Exception as e:
+        logger.warning("Failed to initialize Milvus collection: %s", e)
     logger.info("Starting scheduler loop...")
     scheduler.start_loop()
     yield

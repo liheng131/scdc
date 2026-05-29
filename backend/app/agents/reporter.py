@@ -2,42 +2,188 @@
 ReporterAgent（报告生成 Agent）
 
 职责：
-- 接收 AnalyzerAgent 的分析结果，组装为结构化 Markdown 报告
-- 按洞察类别（趋势/竞品/机会/风险/综合）分组呈现
-- 为每条洞察附加证据引用标记（[^1]），并生成来源追溯列表
-- 可选生成 ECharts 饼图配置，展示洞察维度分布
-
-为什么使用 Markdown：
-- 跨平台兼容，前端可用 Markdown 渲染库展示
-- 纯文本便于版本控制和差异对比
-- 支持导出为 PDF/HTML 等格式
+- 接收 AnalyzerAgent 的结构化分析结果，调用 LLM 撰写完整的叙事性市场洞察报告
+- LLM 不可用时自动降级为模板组装模式
+- 生成 ECharts 饼图配置，展示洞察维度分布
 """
 
 import datetime
+import json
 import logging
+import traceback
 from typing import List, Dict, Any, Tuple
+
+import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from app.schemas.agent import ReporterInput, ReporterOutput, ReportSection, Insight
+from app.core.config import settings
+from app.core.runtime_config import rumtime_config
 
 logger = logging.getLogger(__name__)
 
+
 class ReporterAgent:
     def __init__(self):
-        self.category_names = {
-            "trend": "📈 行业发展趋势 (Trends)",
-            "competitor": "🛡️ 竞争格局与动态 (Competitors)",
-            "opportunity": "💡 潜在商业机会 (Opportunities)",
-            "risk": "⚠️ 市场风险预警 (Risks)",
-            "general": "🔍 综合分析观察 (General Observations)"
-        }
+        self.llm_provider = rumtime_config.get("llm_provider")
+        self.default_model = rumtime_config.get("default_model")
+        self.llm_base_url = rumtime_config.get("llm_base_url")
+        self.llm_api_key = settings.llm_api_key
+        self._db_config_loaded = False
+
+        self._build_llm_config()
+
+    def _build_llm_config(self):
+        if self.llm_provider == "gpustack":
+            self.llm_url = f"{self.llm_base_url.rstrip('/')}/v1/chat/completions"
+            self.headers = {
+                "Authorization": f"Bearer {self.llm_api_key}",
+                "Content-Type": "application/json",
+            }
+        else:
+            self.llm_url = f"{self.llm_base_url.rstrip('/')}/api/generate"
+            self.headers = {}
+
+    async def _ensure_db_config(self):
+        if self._db_config_loaded:
+            return
+        self._db_config_loaded = True
+        try:
+            db_config = await rumtime_config.get_default_model_config("llm")
+            if db_config:
+                self.llm_provider = db_config["provider"].lower() if db_config["provider"] else self.llm_provider
+                self.default_model = db_config["model_name"] or self.default_model
+                if db_config["base_url"]:
+                    self.llm_base_url = db_config["base_url"]
+                if db_config["api_key"]:
+                    self.llm_api_key = db_config["api_key"]
+                self._build_llm_config()
+        except Exception:
+            pass
+
+    def _build_report_prompt(
+        self,
+        topic: str,
+        summary: str,
+        insights: List[Insight],
+        dimensions: List[str],
+        source_contents: List[Dict[str, Any]] = None,
+    ) -> str:
+        dim_sections: Dict[str, List[str]] = {d: [] for d in dimensions}
+        for idx, ins in enumerate(insights, 1):
+            dim = ins.dimension
+            if dim not in dim_sections:
+                dim = dimensions[0] if dimensions else ""
+            dim_sections.setdefault(dim, []).append(
+                f"  - {ins.conclusion} (置信度: {ins.confidence:.0%})\n"
+                f"    分析: {ins.analysis}\n"
+            )
+
+        dim_blocks = []
+        for dim in dimensions:
+            entries = dim_sections.get(dim, [])
+            if entries:
+                dim_blocks.append(f"## {dim}\n{''.join(entries)}")
+            else:
+                dim_blocks.append(f"## {dim}\n  (暂无足够数据支撑该维度分析，请基于现有材料合理推断)\n")
+
+        dim_text = "\n".join(dim_blocks)
+        dim_outline = "\n".join(f"{i+1}. {d}" for i, d in enumerate(dimensions))
+
+        sources_section = ""
+        if source_contents:
+            source_parts = []
+            for i, sc in enumerate(source_contents):
+                source_parts.append(
+                    f"--- Source #{i+1} ---\n"
+                    f"Title: {sc.get('title', 'N/A')}\n"
+                    f"URI: {sc.get('uri', 'N/A')}\n"
+                    f"Content: {sc.get('content', '')[:2000]}\n"
+                )
+            sources_section = "\n== SOURCE MATERIALS FOR REFERENCE ==\n" + "\n".join(source_parts) + "\n"
+
+        prompt = f"""You are a senior market intelligence analyst at McKinsey & Company with 20 years of experience. Write a professional, deep market insight report in Chinese.
+
+The topic is: "{topic}"
+
+Below is the structured analysis prepared by an AI research assistant, organized by analytical dimensions. Your job is to transform it into a polished, boardroom-ready report.
+
+{sources_section}
+== EXECUTIVE SUMMARY ==
+{summary}
+
+== INSIGHTS BY DIMENSION ==
+{dim_text}
+
+== REPORT STRUCTURE REQUIREMENTS ==
+
+Write in Chinese. Follow this structure:
+
+## 📑 执行摘要 (Executive Summary)
+Write 3-4 paragraphs (250-400 words) synthesizing findings across ALL dimensions. Include key numbers, company names, and directional signals.
+
+{dim_outline}
+
+For each of the {len(dimensions)} dimensions above, write a dedicated chapter:
+- Start with ## 标题, using the exact dimension name
+- Write 2-4 paragraphs per dimension with substantive analysis
+- Integrate the corresponding insights naturally - do NOT just list them
+- Include specific evidence, data points, and company references where available
+
+## ⚠️ 跨维度风险与挑战
+Write 2-3 paragraphs synthesizing risks that span multiple dimensions. Cover probability and impact.
+
+## 💡 综合战略建议
+Write 3-5 actionable, specific recommendations. Each as a bullet with 2-3 sentences of rationale.
+
+## 🔗 数据来源说明
+Briefly note data sources. Do NOT list individual URLs - the system will append those.
+
+== STYLE GUIDELINES ==
+- Professional, boardroom-ready Chinese prose
+- Data-driven: cite specific facts/numbers whenever possible
+- Balanced: acknowledge uncertainty
+- Actionable: every section should help decision-making
+- Total: 1500-3000 Chinese characters
+- Use ## headings, **bold**, bullet lists, > blockquotes"""
+
+        return prompt
+
+    @retry(
+        stop=stop_after_attempt(1),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)),
+        reraise=True,
+    )
+    async def _call_llm(self, prompt: str, timeout: int = 60) -> str:
+        if self.llm_provider == "gpustack":
+            payload = {
+                "model": self.default_model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": rumtime_config.get("temperature"),
+                "max_tokens": rumtime_config.get("max_tokens"),
+            }
+        else:
+            payload = {
+                "model": self.default_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": rumtime_config.get("temperature")},
+            }
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(self.llm_url, json=payload, headers=self.headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if self.llm_provider == "gpustack":
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            else:
+                return data.get("response", "")
 
     def _build_evidence_map(self, insights: List[Insight]) -> Tuple[Dict[str, int], List[str]]:
-        """
-        为每条唯一 URI 分配脚注编号 [^1], [^2], ...
-
-        为什么使用脚注：
-        - Markdown 原生支持脚注语法 [^1]
-        - 让读者可以快速在报告底部找到证据来源的原始链接
-        """
         evidence_map: Dict[str, int] = {}
         reference_list: List[str] = []
         idx = 1
@@ -50,32 +196,17 @@ class ReporterAgent:
         return evidence_map, reference_list
 
     def _generate_chart_configs(self, topic: str, insights: List[Insight]) -> List[Dict[str, Any]]:
-        """
-        根据洞察类别分布生成 ECharts 饼图配置
-
-        为什么输出配置而非图片：
-        - 前端可直接传入 ECharts 实例渲染，交互式图表体验更好
-        - 不依赖服务端渲染库，保持后端轻量化
-        """
-        cat_counts: Dict[str, int] = {}
+        dim_counts: Dict[str, int] = {}
         for insight in insights:
-            cat = insight.category if insight.category in self.category_names else "general"
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            dim = insight.dimension or ""
+            dim_counts[dim] = dim_counts.get(dim, 0) + 1
 
-        chart_data = [{"name": self.category_names.get(k, k).split(" ")[1], "value": v} for k, v in cat_counts.items()]
+        chart_data = [{"name": k or "未分类", "value": v} for k, v in dim_counts.items()]
 
         option = {
-            "title": {
-                "text": f"洞察维度分布 - {topic}",
-                "left": "center"
-            },
-            "tooltip": {
-                "trigger": "item"
-            },
-            "legend": {
-                "orient": "vertical",
-                "left": "left"
-            },
+            "title": {"text": f"分析维度分布 - {topic}", "left": "center"},
+            "tooltip": {"trigger": "item"},
+            "legend": {"orient": "vertical", "left": "left"},
             "series": [
                 {
                     "name": "洞察数量",
@@ -86,83 +217,138 @@ class ReporterAgent:
                         "itemStyle": {
                             "shadowBlur": 10,
                             "shadowOffsetX": 0,
-                            "shadowColor": "rgba(0, 0, 0, 0.5)"
+                            "shadowColor": "rgba(0, 0, 0, 0.5)",
                         }
-                    }
+                    },
                 }
-            ]
+            ],
         }
         return [option]
 
+    def _build_template_report(
+        self,
+        topic: str,
+        summary: str,
+        insights: List[Insight],
+        evidence_map: Dict[str, int],
+        reference_list: List[str],
+    ) -> str:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        header = (
+            f"# 深度市场洞察报告：{topic}\n\n"
+            f"> **执行时间**: {now_str}  \n"
+            f"> **数据来源**: 全网多渠道汇聚清洗  \n"
+            f"> **分析引擎**: SCDC AI Agent System  \n"
+            f"> *注：LLM 报告生成服务暂不可用，以下为结构化数据输出*\n\n"
+            f"---\n\n"
+        )
+
+        exec_section = f"## 📑 执行摘要 (Executive Summary)\n\n{summary}\n\n"
+
+        dim_groups: Dict[str, List[Insight]] = {}
+        for insight in insights:
+            dim = insight.dimension or "综合分析"
+            dim_groups.setdefault(dim, []).append(insight)
+
+        insights_parts = ["## 🎯 维度分析 (Dimension Analysis)\n"]
+        for dim_label, dim_insights in dim_groups.items():
+            insights_parts.append(f"### {dim_label}\n")
+            for ci in dim_insights:
+                footnote_tags = "".join(
+                    [f"[^{evidence_map[uri]}]" for uri in ci.evidence if uri in evidence_map]
+                )
+                conf_badge = f" `置信度: {ci.confidence:.1%}`" if ci.confidence > 0 else ""
+                insights_parts.append(f"**{ci.conclusion}**{conf_badge}{footnote_tags}\n\n")
+                if ci.analysis:
+                    insights_parts.append(f"{ci.analysis}\n\n")
+            insights_parts.append("\n")
+
+        ref_parts = ["## 🔗 来源与证据追踪 (References)\n"]
+        for idx, uri in enumerate(reference_list, 1):
+            ref_parts.append(f"[^{idx}]: [{uri}]({uri})\n")
+
+        return header + exec_section + "\n".join(insights_parts) + "\n".join(ref_parts)
+
     async def execute(self, input_data: ReporterInput) -> ReporterOutput:
-        """
-        组装最终分析报告，包含四个章节：
-        ① 报告元数据（标题、时间、数据来源）
-        ② 执行摘要（LLM 生成的全局概述）
-        ③ 核心洞察（按类别分组 + 证据引用）
-        ④ 来源追溯（脚注列表，包含原始链接）
-        """
-        logger.info(f"ReporterAgent started for task '{input_data.task_id}', topic '{input_data.topic}'")
+        await self._ensure_db_config()
+        logger.info(
+            f"ReporterAgent started for task '{input_data.task_id}', topic '{input_data.topic}'"
+        )
 
         ao = input_data.analyzer_output
         insights = ao.insights
+        summary = ao.summary
         evidence_map, reference_list = self._build_evidence_map(insights)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        chart_configs = (
+            self._generate_chart_configs(input_data.topic, insights)
+            if input_data.include_charts and insights
+            else []
+        )
 
         sections: List[ReportSection] = []
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 章节 1: 报告元数据
-        header_md = f"# 深度市场洞察报告：{input_data.topic}\n\n" \
-                    f"> **执行时间**: {now_str}  \n" \
-                    f"> **数据来源**: 全网多渠道汇聚清洗  \n" \
-                    f"> **分析引擎**: SCDC AI Agent System\n"
-        sections.append(ReportSection(title="报告元数据", content=header_md))
+        if insights:
+            try:
+                logger.info(f"ReporterAgent calling LLM for topic '{input_data.topic}'")
+                dimensions = input_data.dimensions if input_data.dimensions else []
+                prompt = self._build_report_prompt(
+                    input_data.topic, summary, insights, dimensions,
+                    source_contents=input_data.source_contents if input_data.source_contents else None,
+                )
+                llm_report = await self._call_llm(prompt, timeout=120)
 
-        # 章节 2: 执行摘要
-        exec_md = f"## 📑 执行摘要 (Executive Summary)\n\n{ao.summary}\n"
-        sections.append(ReportSection(title="执行摘要", content=exec_md))
+                if llm_report and len(llm_report.strip()) > 100:
+                    header_md = (
+                        f"# 深度市场洞察报告：{input_data.topic}\n\n"
+                        f"> **执行时间**: {now_str}  \n"
+                        f"> **数据来源**: 全网多渠道汇聚清洗  \n"
+                        f"> **分析引擎**: SCDC AI Agent System\n\n"
+                        f"---\n\n"
+                    )
+                    ref_parts = ["\n\n## 🔗 来源与证据追踪 (References)\n"]
+                    for idx, uri in enumerate(reference_list, 1):
+                        ref_parts.append(f"[^{idx}]: [{uri}]({uri})\n")
 
-        # 章节 3: 按类别分组的核心洞察（带置信度和证据引用）
-        categories_dict: Dict[str, List[Insight]] = {}
-        for insight in insights:
-            cat = insight.category if insight.category in self.category_names else "general"
-            categories_dict.setdefault(cat, []).append(insight)
+                    full_markdown = header_md + llm_report.strip() + "\n".join(ref_parts)
+                    sections.append(ReportSection(title="完整报告", content=full_markdown))
 
-        insights_md_parts = ["## 🎯 核心分析与洞察 (Key Insights)\n"]
-        for cat_key, cat_label in self.category_names.items():
-            cat_insights = categories_dict.get(cat_key, [])
-            if not cat_insights:
-                continue
+                    logger.info(
+                        f"ReporterAgent LLM report generated for '{input_data.task_id}' "
+                        f"({len(full_markdown)} chars)"
+                    )
+                    return ReporterOutput(
+                        task_id=input_data.task_id,
+                        success=True,
+                        markdown_report=full_markdown,
+                        sections=sections,
+                        chart_configs=chart_configs,
+                    )
+                else:
+                    logger.warning(
+                        f"LLM returned short/invalid report for '{input_data.task_id}', "
+                        f"falling back to template"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"ReporterAgent LLM call failed for '{input_data.task_id}': "
+                    f"{type(e).__name__}: {e}. Falling back to template\n{traceback.format_exc()}"
+                )
 
-            insights_md_parts.append(f"### {cat_label}\n")
-            for ci in cat_insights:
-                footnote_tags = "".join([f"[^{evidence_map[uri]}]" for uri in ci.evidence if uri in evidence_map])
-                conf_badge = f" `置信度: {ci.confidence:.1%}`" if ci.confidence > 0 else ""
-                insights_md_parts.append(f"- **{ci.conclusion}**{conf_badge} {footnote_tags}\n")
-            insights_md_parts.append("\n")
+        full_markdown = self._build_template_report(
+            input_data.topic, summary, insights, evidence_map, reference_list
+        )
+        sections.append(ReportSection(title="完整报告", content=full_markdown))
 
-        insights_md = "\n".join(insights_md_parts)
-        sections.append(ReportSection(title="核心洞察", content=insights_md))
-
-        # 章节 4: 来源与证据追踪
-        ref_parts = ["## 🔗 来源与证据追踪 (References)\n"]
-        for idx, uri in enumerate(reference_list, 1):
-            ref_parts.append(f"[^{idx}]: [{uri}]({uri})")
-
-        ref_md = "\n".join(ref_parts) + "\n"
-        sections.append(ReportSection(title="来源追溯", content=ref_md))
-
-        # 合并为完整 Markdown
-        full_markdown = "\n".join([sec.content for sec in sections])
-
-        # 按需生成图表配置
-        chart_configs = self._generate_chart_configs(input_data.topic, insights) if input_data.include_charts and insights else []
-
-        logger.info(f"ReporterAgent successfully generated report for '{input_data.task_id}' ({len(full_markdown)} chars)")
+        logger.info(
+            f"ReporterAgent template report generated for '{input_data.task_id}' "
+            f"({len(full_markdown)} chars)"
+        )
         return ReporterOutput(
             task_id=input_data.task_id,
             success=True,
             markdown_report=full_markdown,
             sections=sections,
-            chart_configs=chart_configs
+            chart_configs=chart_configs,
         )
