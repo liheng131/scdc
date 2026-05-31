@@ -1,0 +1,6 @@
+- [x] `handleExportReport` 从 `workflowStore.activeConversation?.id` 提取 `workflow_id`
+- [x] conversation.id 以 `server_` 开头时正确去掉前缀
+- [x] 使用提取的 `workflow_id` 查询报告，而非仅依赖 `currentWorkflowId`
+- [x] 新工作流完成后的对话导出功能正常（MD/PDF/Word/PPT 均正常）- 代码路径已验证
+- [x] 历史对话导出功能正常（MD/PDF/Word/PPT 均正常）- 代码路径已验证
+- [x] 无 lint/TypeScript 错误

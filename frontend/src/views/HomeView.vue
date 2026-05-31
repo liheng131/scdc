@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { DataLine, Document, RefreshRight } from '@element-plus/icons-vue';
 import * as echarts from 'echarts';
-import { tasksApi, reportsApi, dataSourcesApi, type ReportStatisticsItem } from '../api';
+import { tasksApi, reportsApi, dataSourcesApi, type ReportStatisticsItem, metricsApi, type MetricsData } from '../api';
 import { ElMessage } from 'element-plus';
 
 const stats = ref({
@@ -18,6 +18,11 @@ const currentPeriod = ref<'month' | 'week' | 'day' | 'year'>('month');
 const statisticsData = ref<ReportStatisticsItem[]>([]);
 const statisticsLoading = ref(false);
 const chartRef = ref<HTMLElement | null>(null);
+
+const metricsData = ref<MetricsData | null>(null);
+const metricsHistory = ref<Array<{ time: string; rps: number; latency: number }>>([]);
+let metricsTimer: ReturnType<typeof setInterval> | null = null;
+const trendChartRef = ref<HTMLElement | null>(null);
 
 const fetchSummaryData = async () => {
   loading.value = true;
@@ -103,6 +108,75 @@ const initStatisticsChart = () => {
   myChart.setOption(option);
 };
 
+const fetchMetrics = async () => {
+  try {
+    const res = await metricsApi.getMetrics();
+    metricsData.value = res.data;
+    const now = new Date();
+    const timeStr = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0') + ':' + now.getSeconds().toString().padStart(2, '0');
+    metricsHistory.value.push({
+      time: timeStr,
+      rps: res.data?.requests_per_second || 0,
+      latency: res.data?.latency_ms_p95 || 0,
+    });
+    if (metricsHistory.value.length > 60) {
+      metricsHistory.value.splice(0, metricsHistory.value.length - 60);
+    }
+    initTrendChart();
+  } catch (err) {
+    // silent fail for metrics
+  }
+};
+
+const initTrendChart = () => {
+  if (!trendChartRef.value || metricsHistory.value.length < 2) return;
+  const myChart = echarts.init(trendChartRef.value);
+  const option = {
+    title: {
+      text: '系统性能趋势',
+      left: 'center',
+      textStyle: { color: '#2d3748', fontSize: 16, fontWeight: 600 },
+    },
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['请求速率 (req/s)', 'P95 延迟 (ms)'], bottom: 0 },
+    grid: { left: '3%', right: '4%', bottom: '12%', containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: metricsHistory.value.map(item => item.time),
+      boundaryGap: false,
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: 'req/s',
+      },
+      {
+        type: 'value',
+        name: 'ms',
+      },
+    ],
+    series: [
+      {
+        name: '请求速率 (req/s)',
+        type: 'line',
+        data: metricsHistory.value.map(item => item.rps),
+        smooth: true,
+        itemStyle: { color: '#409eff' },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(64,158,255,0.3)' }, { offset: 1, color: 'rgba(64,158,255,0.05)' }]) },
+      },
+      {
+        name: 'P95 延迟 (ms)',
+        type: 'line',
+        yAxisIndex: 1,
+        data: metricsHistory.value.map(item => item.latency),
+        smooth: true,
+        itemStyle: { color: '#e6a23c' },
+      },
+    ],
+  };
+  myChart.setOption(option);
+};
+
 const handlePeriodChange = (period: 'day' | 'week' | 'month' | 'year') => {
   currentPeriod.value = period;
   fetchStatistics();
@@ -111,6 +185,15 @@ const handlePeriodChange = (period: 'day' | 'week' | 'month' | 'year') => {
 onMounted(() => {
   fetchSummaryData();
   fetchStatistics();
+  fetchMetrics();
+  metricsTimer = setInterval(fetchMetrics, 10000);
+});
+
+onUnmounted(() => {
+  if (metricsTimer) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
 });
 </script>
 
@@ -124,10 +207,56 @@ onMounted(() => {
       <el-button type="primary" :icon="RefreshRight" round @click="fetchSummaryData; fetchStatistics();">刷新指标</el-button>
     </div>
 
-    <!-- 主内容区域：左侧统计图表，右侧内容 -->
+    <el-row :gutter="20" class="metrics-row">
+      <el-col :span="4">
+        <el-card shadow="hover" class="metric-card-small">
+          <div class="metric-card-small-content">
+            <span class="metric-card-small-label">每秒请求</span>
+            <span class="metric-card-small-val" style="color: #409eff">{{ metricsData?.requests_per_second?.toFixed(1) || '--' }} req/s</span>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="4">
+        <el-card shadow="hover" class="metric-card-small">
+          <div class="metric-card-small-content">
+            <span class="metric-card-small-label">P95 延迟</span>
+            <span class="metric-card-small-val" style="color: #e6a23c">{{ metricsData?.latency_ms_p95?.toFixed(1) || '--' }} ms</span>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="4">
+        <el-card shadow="hover" class="metric-card-small">
+          <div class="metric-card-small-content">
+            <span class="metric-card-small-label">错误率</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.error_rate ?? 0) > 5 ? '#f56c6c' : '#67c23a' }">{{ metricsData?.error_rate?.toFixed(2) || '--' }} %</span>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="4">
+        <el-card shadow="hover" class="metric-card-small">
+          <div class="metric-card-small-content">
+            <span class="metric-card-small-label">CPU</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.cpu_percent ?? 0) > 80 ? '#f56c6c' : '#409eff' }">{{ metricsData?.cpu_percent?.toFixed(1) || '--' }} %</span>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="4">
+        <el-card shadow="hover" class="metric-card-small">
+          <div class="metric-card-small-content">
+            <span class="metric-card-small-label">内存</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.memory_percent ?? 0) > 80 ? '#f56c6c' : '#409eff' }">{{ metricsData?.memory_percent?.toFixed(1) || '--' }} %</span>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <!-- 主内容区域 -->
     <el-row :gutter="20" class="main-content">
       <!-- 左侧：统计图表 -->
       <el-col :span="12">
+        <el-card shadow="hover" class="trend-chart-card" v-if="metricsHistory.length > 0">
+          <div ref="trendChartRef" class="echarts-box"></div>
+        </el-card>
         <el-card shadow="hover" class="statistics-card">
           <template #header>
             <div class="card-header">
@@ -338,5 +467,38 @@ onMounted(() => {
 .view-all-link:hover {
   opacity: 0.8;
   text-decoration: underline;
+}
+
+.metrics-row {
+  margin-bottom: 24px;
+}
+
+.metric-card-small {
+  border-radius: 12px;
+  border: none;
+}
+
+.metric-card-small-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.metric-card-small-label {
+  font-size: 13px;
+  color: #718096;
+}
+
+.metric-card-small-val {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.trend-chart-card {
+  border-radius: 12px;
+  border: none;
+  margin-bottom: 20px;
 }
 </style>

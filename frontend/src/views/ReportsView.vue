@@ -132,7 +132,7 @@ const handleExport = async (row: ReportInfo, fmt: string) => {
     a.download = `report_${row.id}.${fmt}`
     a.click()
     URL.revokeObjectURL(objectUrl)
-    ElMessage.success('导出成功')
+    ElMessage.success('导出成功，该报告已同步至智能报告列表')
   } catch {
     ElMessage.error('导出失败，请重试')
   }
@@ -396,5 +396,13 @@ onMounted(() => {
 .markdown-body ol {
   padding-left: 24px;
   margin-bottom: 16px;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 12px 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 </style>

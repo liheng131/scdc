@@ -74,14 +74,28 @@ class OrchestratorAgent:
 
             # 3. Analyzing Stage - LLM 深度分析提取洞察
             await self._update_status(task_id, "analyzing")
-            ana_in = AnalyzerInput(task_id=task_id, topic=topic, cleaned_items=cln_out.cleaned_items)
+            ana_in = AnalyzerInput(task_id=task_id, topic=topic, cleaned_items=cln_out.cleaned_items, dimensions=input_data.dimensions)
             ana_out = await self.analyzer.execute(ana_in)
             if not ana_out.success:
                 raise RuntimeError(f"Analyzer failed: {ana_out.error}")
 
             # 4. Reporting Stage - 生成结构化 Markdown 报告
             await self._update_status(task_id, "reporting")
-            rep_in = ReporterInput(task_id=task_id, topic=topic, analyzer_output=ana_out, include_charts=input_data.include_charts)
+            import re
+            source_contents = []
+            for ci in cln_out.cleaned_items:
+                full_text = "\n".join(ci.content_chunks) if ci.content_chunks else ci.summary
+                source_contents.append({
+                    "uri": ci.source_uri,
+                    "title": ci.title,
+                    "content": full_text[:1000],
+                })
+            rep_in = ReporterInput(
+                task_id=task_id, topic=topic, analyzer_output=ana_out,
+                include_charts=input_data.include_charts,
+                dimensions=input_data.dimensions,
+                source_contents=source_contents,
+            )
             rep_out = await self.reporter.execute(rep_in)
             if not rep_out.success:
                 raise RuntimeError(f"Reporter failed: {rep_out.error}")
@@ -107,11 +121,30 @@ class OrchestratorAgent:
             err_msg = str(e)
             await self._update_status(task_id, "failed", err_msg)
             ended_at = datetime.datetime.utcnow()
+
+            partial = {}
+            if 'col_out' in locals():
+                partial["collected"] = {
+                    "item_count": len(col_out.items),
+                    "items": [{"title": it.title, "source_uri": it.source_uri} for it in col_out.items[:10]]
+                }
+            if 'cln_out' in locals():
+                partial["cleaned"] = {
+                    "item_count": len(cln_out.cleaned_items),
+                    "items": [{"title": it.title, "source_uri": it.source_uri} for it in cln_out.cleaned_items[:10]]
+                }
+            if 'ana_out' in locals():
+                partial["analyzed"] = {
+                    "summary": ana_out.summary[:200],
+                    "insight_count": len(ana_out.insights)
+                }
+
             return OrchestratorOutput(
                 task_id=task_id,
                 topic=topic,
                 status="failed",
                 started_at=started_at,
                 ended_at=ended_at,
-                error_message=err_msg
+                error_message=err_msg,
+                partial_results=partial if partial else None
             )

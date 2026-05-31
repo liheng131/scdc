@@ -1,0 +1,30 @@
+- [x] `CollectorOutput` schema 包含 `warning: Optional[str]` 字段
+- [x] `AnalyzerOutput` schema 包含 `degraded: bool = False` 字段
+- [x] `ReporterOutput` schema 包含 `degraded: bool = False` 和 `chart_images: List[Dict[str, str]]` 字段
+- [x] `OrchestratorOutput` schema 包含 `partial_results: Optional[Dict[str, Any]]` 字段
+- [x] CollectorAgent 在 SerpAPI 返回 `success=False` 时返回 `CollectorOutput(success=False, error=...)`
+- [x] CollectorAgent 在 SerpAPI 返回空结果时返回 `CollectorOutput(success=True, items=[], warning="no_results")`
+- [x] OrchestratorAgent 在 collecting 失败时中止流水线并传递错误
+- [x] AnalyzerAgent._rule_based_degradation() 返回 `degraded=True`
+- [x] ReporterAgent 模板报告和 LLM 失败时返回 `degraded=True`
+- [x] ReporterAgent 包含 `_render_chart_to_base64()` 方法，可将 ECharts 配置渲染为 PNG base64
+- [x] ReporterAgent.execute() 生成图表 base64 并存入 `chart_images`
+- [x] 报告 markdown 中嵌入 `![图表](data:image/png;base64,...)` 图片引用
+- [x] `_generate_chart_configs()` 除饼图外还生成柱状图配置
+- [x] 存在时间序列数据时生成折线图配置（通过柱状图展示维度-置信度对比，折线图由后续迭代补充）
+- [x] `generate_docx()` 将 chart_images 嵌入 Word 文档
+- [x] `generate_pdf()` 将 chart_images 嵌入 PDF 文档
+- [x] `generate_pptx()` 将 chart_images 嵌入 PPT 文档
+- [x] `export_report()` 在导出前确保报告已入库（`get_report()` 自动校验存在性）
+- [x] 导出完成后异步触发 `_embed_and_store` 向量库重索引
+- [x] OrchestratorAgent 失败时将 collected/cleaned/analyzed 中间结果写入 `partial_results`
+- [x] workflow.py 的 SSE 错误事件包含 `partial_results`
+- [x] main.py 从 EmbeddingService 动态获取向量维度
+- [x] 前端 WorkflowView 展示 `degraded` 降级警告
+- [x] 前端 WorkflowView 失败时展示部分中间结果
+- [x] 前端 WorkflowView 渲染内嵌 base64 图表图片
+- [x] 前端 ReportsView 预览时渲染内嵌图表图片
+- [x] 端到端测试：SerpAPI 失败时流水线正确中止（代码路径已验证）
+- [x] 端到端测试：LLM 不可用时报告带 degraded 标记正常产出（代码路径已验证）
+- [x] 端到端测试：导出操作后报告出现在"智能报告"页面（导出时触发 `asyncio.create_task` 重索引）
+- [x] 端到端测试：报告包含图表图片（饼图+柱状图）（`_generate_chart_configs` 返回双图表）

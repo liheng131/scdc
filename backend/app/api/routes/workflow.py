@@ -25,12 +25,20 @@ class WorkflowStartRequest(BaseModel):
     )
 
 
+class FollowUpRequest(BaseModel):
+    message: str = Field(..., description="追问消息内容")
+    conversation_history: List[dict] = Field(
+        default_factory=list,
+        description="之前的对话历史，每个元素包含 role 和 content",
+    )
+
+
 @router.post("/start", response_model=ResponseModel)
 async def start_workflow(
     req: WorkflowStartRequest,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    state = workflow_service.create_workflow(
+    state = await workflow_service.create_workflow(
         topic=req.topic,
         max_items=req.max_items,
         dimensions=req.dimensions,
@@ -41,12 +49,37 @@ async def start_workflow(
     })
 
 
+@router.post("/follow-up")
+async def follow_up_workflow(
+    req: FollowUpRequest,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    state = await workflow_service.create_workflow(
+        topic=req.message,
+        max_items=0,
+        dimensions=[],
+    )
+    return StreamingResponse(
+        workflow_service.run_follow_up_stream(
+            state=state,
+            message=req.message,
+            conversation_history=req.conversation_history,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{workflow_id}/stream")
 async def stream_workflow(
     workflow_id: str,
     current_user: User = Depends(get_current_active_user_sse),
 ) -> StreamingResponse:
-    state = workflow_service.get_workflow(workflow_id)
+    state = await workflow_service.get_workflow(workflow_id)
     if not state:
         async def err_gen():
             yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
@@ -67,7 +100,7 @@ async def get_workflow_status(
     workflow_id: str,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    state = workflow_service.get_workflow(workflow_id)
+    state = await workflow_service.get_workflow(workflow_id)
     if not state:
         return success_response(data={"error": "Workflow not found"})
     return success_response(data={
@@ -85,4 +118,4 @@ async def get_workflow_status(
 async def get_workflow_history(
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    return success_response(data=workflow_service.get_history())
+    return success_response(data=await workflow_service.get_history())

@@ -9,7 +9,7 @@ API 路由聚合模块
 
 from fastapi import APIRouter
 from app.api.responses import success_response, ResponseModel
-from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, templates, workflow, settings
+from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, templates, workflow, settings, metrics
 
 # 顶层路由实例，所有业务模块的子路由都注册到此处
 api_router = APIRouter()
@@ -32,6 +32,7 @@ api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(templates.router, prefix="/templates", tags=["templates"])
 api_router.include_router(workflow.router, prefix="/workflow", tags=["workflow"])
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
+api_router.include_router(metrics.router, prefix="/metrics-json", tags=["metrics"])
 
 @api_router.get("/health", response_model=ResponseModel)
 async def health_check():

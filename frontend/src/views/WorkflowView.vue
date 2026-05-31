@@ -236,7 +236,10 @@ const handleExportReport = async (markdown: string, fmt: string) => {
     return;
   }
 
-  const wfId = currentWorkflowId.value;
+  const wfId = currentWorkflowId.value
+    || (workflowStore.activeConversation?.id?.startsWith('server_')
+        ? workflowStore.activeConversation.id.slice(7)
+        : workflowStore.activeConversation?.id);
   if (!wfId) {
     ElMessage.warning('报告尚未完全生成，请稍后重试');
     return;
@@ -391,6 +394,32 @@ const getStatusBadge = (status: string) => {
               <div v-if="msg.stageHint" class="stage-hint-banner">
                 <span class="stage-pulse"></span>
                 <span>{{ msg.stageHint }}</span>
+              </div>
+              <div v-if="msg.stageStats && msg.stageStats.length" class="stage-stats">
+                <div v-for="(stat, si) in msg.stageStats" :key="si" class="stage-stat-item">
+                  <span class="stat-icon">{{ stat.icon }}</span>
+                  <span class="stat-label">{{ stat.label }}</span>
+                  <span class="stat-count">
+                    <template v-if="stat.after !== undefined">{{ stat.before }} → {{ stat.after }}</template>
+                    <template v-else>{{ stat.before }}</template>
+                  </span>
+                </div>
+              </div>
+              <el-alert
+                v-if="msg.degraded"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="degraded-warning"
+              >
+                <template #title>⚠️ AI 分析服务暂不可用，当前展示基于规则/模板生成的结果，报告质量可能受限。</template>
+              </el-alert>
+              <div v-if="msg.partialStats && msg.partialStats.length" class="partial-stats">
+                <div class="partial-stats-title">报告中段生成失败，但已完成以下阶段：</div>
+                <div v-for="(stat, si) in msg.partialStats" :key="si" class="partial-stat-item">
+                  <span class="partial-stat-icon">{{ stat.icon }}</span>
+                  <span class="partial-stat-text">{{ stat.label }}：{{ stat.count }}</span>
+                </div>
               </div>
               <div
                 v-if="msg.content"
@@ -677,6 +706,78 @@ const getStatusBadge = (status: string) => {
   margin-bottom: 4px;
 }
 
+.stage-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  background: #f0fdf4;
+  border-radius: 10px;
+  border: 1px solid #d1fae5;
+}
+
+.stage-stat-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.stat-icon {
+  font-size: 14px;
+}
+
+.stat-label {
+  color: #4a5568;
+  font-weight: 500;
+}
+
+.stat-count {
+  color: #2d3748;
+  font-weight: 700;
+  background: #e6ffed;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.degraded-warning {
+  margin-bottom: 12px;
+}
+
+.partial-stats {
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: #fff7ed;
+  border-radius: 10px;
+  border: 1px solid #fed7aa;
+}
+
+.partial-stats-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #c2410c;
+  margin-bottom: 10px;
+}
+
+.partial-stat-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  font-size: 13px;
+  color: #7c2d12;
+}
+
+.partial-stat-icon {
+  font-size: 14px;
+}
+
+.partial-stat-text {
+  line-height: 1.5;
+}
+
 .stage-pulse {
   width: 8px;
   height: 8px;
@@ -793,6 +894,14 @@ const getStatusBadge = (status: string) => {
   border: none;
   border-top: 1px solid #e2e8f0;
   margin: 16px 0;
+}
+
+.report-body :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 12px 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 
 .report-body :deep(table) {

@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.core.runtime_config import rumtime_config
 from app.services.embedding import EmbeddingService
 from app.services.vectorstore import VectorStoreService
+from app.services.rerank import RerankService
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,8 @@ SOURCE MATERIALS:
             task_id=input_data.task_id,
             success=True,
             summary=combined_summary,
-            insights=insights
+            insights=insights,
+            degraded=True
         )
 
     async def execute(self, input_data: AnalyzerInput) -> AnalyzerOutput:
@@ -229,7 +231,8 @@ SOURCE MATERIALS:
                 task_id=input_data.task_id,
                 success=True,
                 summary=f"No data available to analyze for topic '{input_data.topic}'.",
-                insights=[]
+                insights=[],
+                degraded=False
             )
 
         context_snippets = []
@@ -239,12 +242,16 @@ SOURCE MATERIALS:
                 embedding_service = EmbeddingService()
                 embeddings = await embedding_service.embed_texts_or_empty([input_data.topic])
                 if embeddings and embeddings[0]:
-                    hits = vectorstore.search(embeddings[0], top_k=3)
-                    for hit in hits:
-                        text = hit.get("text", "")
-                        if text:
-                            context_snippets.append(text)
-                    logger.info(f"Retrieved {len(context_snippets)} historical context snippets for topic '{input_data.topic}'")
+                    hits = vectorstore.search(embeddings[0], top_k=20)
+                    if hits:
+                        documents = [hit.get("text", "") for hit in hits]
+                        rerank_service = RerankService()
+                        reranked = await rerank_service.rerank(input_data.topic, documents)
+                        top_indices = [r["index"] for r in reranked[:3]]
+                        context_snippets = [documents[i] for i in top_indices]
+                        logger.info(f"Retrieved {len(hits)} vector hits, reranked to {len(context_snippets)} context snippets for topic '{input_data.topic}'")
+                    else:
+                        logger.info(f"No vector hits found for topic '{input_data.topic}'")
         except Exception as e:
             logger.warning(f"Failed to retrieve vector context for topic '{input_data.topic}': {e}")
 

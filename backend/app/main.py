@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.services.scheduler import SchedulerService
 from app.services.vectorstore import VectorStoreService
+from app.services.embedding import EmbeddingService
 from app.core.db import async_session_factory, migrate_task_id_column, engine
 from app.models.base import Base
 
@@ -89,10 +90,42 @@ async def lifespan(app: FastAPI):
                 logger.info("Migrated existing LLM config to ai_model_configs table")
     except Exception as e:
         logger.warning("Failed to initialize ai_model_configs: %s", e)
+    logger.info("Initializing workflow_runs table...")
+    try:
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS workflow_runs (
+                    id SERIAL PRIMARY KEY,
+                    workflow_id VARCHAR(50) NOT NULL,
+                    topic VARCHAR(500) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'idle',
+                    current_stage VARCHAR(20) NOT NULL DEFAULT '',
+                    stages_json TEXT,
+                    result_json TEXT,
+                    error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            await conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_workflow_runs_workflow_id
+                ON workflow_runs (workflow_id)
+            """))
+    except Exception as e:
+        logger.warning("Failed to initialize workflow_runs: %s", e)
     logger.info("Initializing vector store...")
     try:
         vectorstore = VectorStoreService()
-        vectorstore.init_collection(dim=768)
+        try:
+            embedding_service = EmbeddingService()
+            test_vector = await embedding_service.embed_texts_or_empty(["test"])
+            dim = len(test_vector[0]) if test_vector and test_vector[0] else 768
+            logger.info("Detected embedding dimension: %d", dim)
+        except Exception as e:
+            logger.warning("Failed to detect embedding dimension: %s, falling back to 768", e)
+            dim = 768
+        vectorstore.init_collection(dim=dim)
     except Exception as e:
         logger.warning("Failed to initialize Milvus collection: %s", e)
     logger.info("Starting scheduler loop...")

@@ -1,0 +1,16 @@
+- [ ] OrchestratorInput 的 `dimensions` 字段已存在（schemas/agent.py L132）
+- [ ] `OrchestratorAgent.execute()` 中 `AnalyzerInput` 创建时传入 `dimensions=input_data.dimensions`
+- [ ] `OrchestratorAgent.execute()` 中 `ReporterInput` 创建时传入 `dimensions` 和 `source_contents`
+- [ ] `workflow.py` 的 `run_workflow_stream` 复用 `OrchestratorAgent.execute()` + SSE 回调
+- [ ] `workflow.py` 中不再存在 `_run_collect/_run_clean/_run_analyze/_run_report` 方法
+- [ ] SSE 回调适配器正确桥接 OrchestratorAgent 状态变更到 SSE 事件流
+- [ ] `workflow_runs` 数据库表已创建，含所有必要字段
+- [ ] `WorkflowService.create_workflow` 同步写入 `workflow_runs` 表
+- [ ] `WorkflowService.get_workflow` 优先从数据库读取，内存作二级缓存
+- [ ] `get_history()` 从 `workflow_runs` 表读取全部历史记录
+- [ ] 工作流完成后自动调用 `ReportService.create_from_workflow` 入库
+- [ ] SSE `completed` 事件附带 `report_id`，前端 `onCompleted` 中缓存
+- [ ] 前端消息气泡展示各阶段统计（采集 N 条、清洗后 N 条、生成 N 个洞察）
+- [ ] `tests/e2e/test_pipeline.py` 存在并可执行完整流程
+- [ ] 全流程端到端测试通过，无报错、无降级
+- [ ] 服务重启后，历史工作流记录不丢失

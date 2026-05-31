@@ -40,6 +40,7 @@ class CollectorOutput(BaseModel):
     success: bool
     items: List[CollectedItem] = []
     error: Optional[str] = None
+    warning: Optional[str] = None
 
 # ============================================================
 # Cleaner（清洗）阶段
@@ -89,10 +90,15 @@ class AnalyzerOutput(BaseModel):
     summary: str
     insights: List[Insight] = []
     error: Optional[str] = None
+    degraded: bool = False
 
 # ============================================================
 # Reporter（报告）阶段
 # ============================================================
+
+class ConversationMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
 
 class ReporterInput(BaseModel):
     task_id: str
@@ -101,6 +107,7 @@ class ReporterInput(BaseModel):
     include_charts: bool = True
     source_contents: List[Dict[str, Any]] = []
     dimensions: List[str] = Field(default_factory=list)
+    conversation_history: List[ConversationMessage] = Field(default_factory=list)
 
 class ReportSection(BaseModel):
     title: str
@@ -112,7 +119,9 @@ class ReporterOutput(BaseModel):
     markdown_report: str
     sections: List[ReportSection] = []
     chart_configs: List[Dict[str, Any]] = []
+    chart_images: List[Dict[str, str]] = []
     error: Optional[str] = None
+    degraded: bool = False
 
 # ============================================================
 # Orchestrator（编排）阶段
@@ -137,3 +146,4 @@ class OrchestratorOutput(BaseModel):
     analyzer_output: Optional[AnalyzerOutput] = None
     reporter_output: Optional[ReporterOutput] = None
     error_message: Optional[str] = None
+    partial_results: Optional[Dict[str, Any]] = None

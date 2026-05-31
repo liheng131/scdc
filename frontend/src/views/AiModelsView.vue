@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Edit, Delete, Connection, StarFilled } from '@element-plus/icons-vue'
 import { settingsApi, type AiModelConfig } from '../api/services/settings'
+
+const props = defineProps<{
+  modelType?: 'llm' | 'embedding' | 'rerank' | 'all'
+}>()
 
 const MODEL_TYPE_LABELS: Record<string, string> = {
   llm: 'LLM 推理模型',
@@ -19,11 +23,20 @@ const models = reactive<Record<string, AiModelConfig[]>>({
   rerank: [],
 })
 
+const displayModels = computed(() => {
+  if (props.modelType && props.modelType !== 'all') {
+    return models[props.modelType]
+  }
+  return [...models.llm, ...models.embedding, ...models.rerank]
+})
+
+const activeTab = ref(props.modelType || 'llm')
+
 const dialogVisible = ref(false)
 const dialogTitle = ref('添加模型')
 const dialogLoading = ref(false)
 const editingId = ref<number | null>(null)
-const currentModelType = ref('llm')
+const currentModelType = ref(props.modelType || 'llm')
 
 const formData = reactive({
   provider: '',
@@ -180,96 +193,334 @@ onMounted(() => {
 
 <template>
   <div class="settings-container">
-    <el-card
-      v-for="modelType in MODEL_TYPES"
-      :key="modelType"
-      shadow="never"
-      class="settings-card"
-      v-loading="loading"
-    >
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">{{ MODEL_TYPE_LABELS[modelType] }}</span>
-          <el-button type="primary" :icon="Plus" @click="openAddDialog(modelType)">
+    <el-card shadow="never" class="settings-card" v-loading="loading">
+      <template v-if="props.modelType && props.modelType !== 'all'">
+        <div class="tab-header">
+          <el-button type="primary" :icon="Plus" @click="openAddDialog(props.modelType)">
             添加模型
           </el-button>
         </div>
+        <el-table
+          v-if="displayModels.length > 0"
+          :data="displayModels"
+          stripe
+          style="width: 100%"
+        >
+          <el-table-column prop="provider" label="供应商" width="120" />
+          <el-table-column prop="model_name" label="模型名" width="160" />
+          <el-table-column label="服务地址" min-width="200">
+            <template #default="{ row }">
+              <el-tooltip :content="row.base_url" placement="top" :disabled="!row.base_url || row.base_url.length <= 40">
+                <span>{{ truncateUrl(row.base_url) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
+          <el-table-column label="API Key" width="100" align="center">
+            <template #default="{ row }">
+              <span :class="{ 'api-key-unset': !row.api_key }">
+                {{ maskApiKey(row.api_key) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="默认标记" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.is_default" type="warning" size="small">
+                <el-icon style="margin-right: 2px"><StarFilled /></el-icon>
+                默认
+              </el-tag>
+              <span v-else class="not-default">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="320" fixed="right" align="center">
+            <template #default="{ row }">
+              <el-button type="primary" size="small" :icon="Edit" @click="openEditDialog(row)">
+                编辑
+              </el-button>
+              <el-popconfirm
+                title="确认删除该模型？"
+                confirm-button-text="确认删除"
+                cancel-button-text="取消"
+                @confirm="handleDelete(row)"
+              >
+                <template #reference>
+                  <el-button type="danger" size="small" :icon="Delete">
+                    删除
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <el-button
+                type="warning"
+                size="small"
+                :disabled="row.is_default"
+                @click="handleSetDefault(row)"
+              >
+                设为默认
+              </el-button>
+              <el-button
+                type="success"
+                size="small"
+                :icon="Connection"
+                :loading="isTesting(row.id)"
+                @click="handleTestConnection(row)"
+              >
+                测试连接
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty
+          v-else
+          :description="`暂无${MODEL_TYPE_LABELS[props.modelType]}配置`"
+          :image-size="80"
+        />
       </template>
 
-      <el-table
-        v-if="models[modelType].length > 0"
-        :data="models[modelType]"
-        stripe
-        style="width: 100%"
-      >
-        <el-table-column prop="provider" label="供应商" width="120" />
-        <el-table-column prop="model_name" label="模型名" width="160" />
-        <el-table-column label="服务地址" min-width="200">
-          <template #default="{ row }">
-            <el-tooltip :content="row.base_url" placement="top" :disabled="!row.base_url || row.base_url.length <= 40">
-              <span>{{ truncateUrl(row.base_url) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column label="API Key" width="100" align="center">
-          <template #default="{ row }">
-            <span :class="{ 'api-key-unset': !row.api_key }">
-              {{ maskApiKey(row.api_key) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="默认标记" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag v-if="row.is_default" type="warning" size="small">
-              <el-icon style="margin-right: 2px"><StarFilled /></el-icon>
-              默认
-            </el-tag>
-            <span v-else class="not-default">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="320" fixed="right" align="center">
-          <template #default="{ row }">
-            <el-button type="primary" size="small" :icon="Edit" @click="openEditDialog(row)">
-              编辑
-            </el-button>
-            <el-popconfirm
-              title="确认删除该模型？"
-              confirm-button-text="确认删除"
-              cancel-button-text="取消"
-              @confirm="handleDelete(row)"
+      <template v-else>
+        <el-tabs v-model="activeTab" class="models-tabs">
+          <el-tab-pane label="LLM推理模型" name="llm">
+            <div class="tab-header">
+              <el-button type="primary" :icon="Plus" @click="openAddDialog('llm')">
+                添加模型
+              </el-button>
+            </div>
+            <el-table
+              v-if="models.llm.length > 0"
+              :data="models.llm"
+              stripe
+              style="width: 100%"
             >
-              <template #reference>
-                <el-button type="danger" size="small" :icon="Delete">
-                  删除
-                </el-button>
-              </template>
-            </el-popconfirm>
-            <el-button
-              type="warning"
-              size="small"
-              :disabled="row.is_default"
-              @click="handleSetDefault(row)"
-            >
-              设为默认
-            </el-button>
-            <el-button
-              type="success"
-              size="small"
-              :icon="Connection"
-              :loading="isTesting(row.id)"
-              @click="handleTestConnection(row)"
-            >
-              测试连接
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+              <el-table-column prop="provider" label="供应商" width="120" />
+              <el-table-column prop="model_name" label="模型名" width="160" />
+              <el-table-column label="服务地址" min-width="200">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.base_url" placement="top" :disabled="!row.base_url || row.base_url.length <= 40">
+                    <span>{{ truncateUrl(row.base_url) }}</span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="API Key" width="100" align="center">
+                <template #default="{ row }">
+                  <span :class="{ 'api-key-unset': !row.api_key }">
+                    {{ maskApiKey(row.api_key) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="默认标记" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.is_default" type="warning" size="small">
+                    <el-icon style="margin-right: 2px"><StarFilled /></el-icon>
+                    默认
+                  </el-tag>
+                  <span v-else class="not-default">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="320" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" :icon="Edit" @click="openEditDialog(row)">
+                    编辑
+                  </el-button>
+                  <el-popconfirm
+                    title="确认删除该模型？"
+                    confirm-button-text="确认删除"
+                    cancel-button-text="取消"
+                    @confirm="handleDelete(row)"
+                  >
+                    <template #reference>
+                      <el-button type="danger" size="small" :icon="Delete">
+                        删除
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                  <el-button
+                    type="warning"
+                    size="small"
+                    :disabled="row.is_default"
+                    @click="handleSetDefault(row)"
+                  >
+                    设为默认
+                  </el-button>
+                  <el-button
+                    type="success"
+                    size="small"
+                    :icon="Connection"
+                    :loading="isTesting(row.id)"
+                    @click="handleTestConnection(row)"
+                  >
+                    测试连接
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty
+              v-else
+              :description="`暂无LLM推理模型配置`"
+              :image-size="80"
+            />
+          </el-tab-pane>
 
-      <el-empty
-        v-else
-        :description="`暂无${MODEL_TYPE_LABELS[modelType]}配置`"
-        :image-size="80"
-      />
+          <el-tab-pane label="Embedding嵌入模型" name="embedding">
+            <div class="tab-header">
+              <el-button type="primary" :icon="Plus" @click="openAddDialog('embedding')">
+                添加模型
+              </el-button>
+            </div>
+            <el-table
+              v-if="models.embedding.length > 0"
+              :data="models.embedding"
+              stripe
+              style="width: 100%"
+            >
+              <el-table-column prop="provider" label="供应商" width="120" />
+              <el-table-column prop="model_name" label="模型名" width="160" />
+              <el-table-column label="服务地址" min-width="200">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.base_url" placement="top" :disabled="!row.base_url || row.base_url.length <= 40">
+                    <span>{{ truncateUrl(row.base_url) }}</span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="API Key" width="100" align="center">
+                <template #default="{ row }">
+                  <span :class="{ 'api-key-unset': !row.api_key }">
+                    {{ maskApiKey(row.api_key) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="默认标记" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.is_default" type="warning" size="small">
+                    <el-icon style="margin-right: 2px"><StarFilled /></el-icon>
+                    默认
+                  </el-tag>
+                  <span v-else class="not-default">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="320" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" :icon="Edit" @click="openEditDialog(row)">
+                    编辑
+                  </el-button>
+                  <el-popconfirm
+                    title="确认删除该模型？"
+                    confirm-button-text="确认删除"
+                    cancel-button-text="取消"
+                    @confirm="handleDelete(row)"
+                  >
+                    <template #reference>
+                      <el-button type="danger" size="small" :icon="Delete">
+                        删除
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                  <el-button
+                    type="warning"
+                    size="small"
+                    :disabled="row.is_default"
+                    @click="handleSetDefault(row)"
+                  >
+                    设为默认
+                  </el-button>
+                  <el-button
+                    type="success"
+                    size="small"
+                    :icon="Connection"
+                    :loading="isTesting(row.id)"
+                    @click="handleTestConnection(row)"
+                  >
+                    测试连接
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty
+              v-else
+              :description="`暂无Embedding嵌入模型配置`"
+              :image-size="80"
+            />
+          </el-tab-pane>
+
+          <el-tab-pane label="Rerank重排序模型" name="rerank">
+            <div class="tab-header">
+              <el-button type="primary" :icon="Plus" @click="openAddDialog('rerank')">
+                添加模型
+              </el-button>
+            </div>
+            <el-table
+              v-if="models.rerank.length > 0"
+              :data="models.rerank"
+              stripe
+              style="width: 100%"
+            >
+              <el-table-column prop="provider" label="供应商" width="120" />
+              <el-table-column prop="model_name" label="模型名" width="160" />
+              <el-table-column label="服务地址" min-width="200">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.base_url" placement="top" :disabled="!row.base_url || row.base_url.length <= 40">
+                    <span>{{ truncateUrl(row.base_url) }}</span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="API Key" width="100" align="center">
+                <template #default="{ row }">
+                  <span :class="{ 'api-key-unset': !row.api_key }">
+                    {{ maskApiKey(row.api_key) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="默认标记" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.is_default" type="warning" size="small">
+                    <el-icon style="margin-right: 2px"><StarFilled /></el-icon>
+                    默认
+                  </el-tag>
+                  <span v-else class="not-default">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="320" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" :icon="Edit" @click="openEditDialog(row)">
+                    编辑
+                  </el-button>
+                  <el-popconfirm
+                    title="确认删除该模型？"
+                    confirm-button-text="确认删除"
+                    cancel-button-text="取消"
+                    @confirm="handleDelete(row)"
+                  >
+                    <template #reference>
+                      <el-button type="danger" size="small" :icon="Delete">
+                        删除
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                  <el-button
+                    type="warning"
+                    size="small"
+                    :disabled="row.is_default"
+                    @click="handleSetDefault(row)"
+                  >
+                    设为默认
+                  </el-button>
+                  <el-button
+                    type="success"
+                    size="small"
+                    :icon="Connection"
+                    :loading="isTesting(row.id)"
+                    @click="handleTestConnection(row)"
+                  >
+                    测试连接
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty
+              v-else
+              :description="`暂无Rerank重排序模型配置`"
+              :image-size="80"
+            />
+          </el-tab-pane>
+        </el-tabs>
+      </template>
     </el-card>
 
     <el-dialog
@@ -324,16 +575,14 @@ onMounted(() => {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
 }
 
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.models-tabs {
+  padding: 10px 0;
 }
 
-.card-title {
-  font-weight: 600;
-  font-size: 18px;
-  color: #1e222d;
+.tab-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
 }
 
 .api-key-unset {

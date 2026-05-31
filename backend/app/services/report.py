@@ -16,14 +16,18 @@
 """
 
 import asyncio
+import base64
 import io
 import logging
+import os
 import re
-from typing import List, Optional, Tuple
+import tempfile
+from typing import Dict, List, Optional, Tuple
 import docx
+import docx.shared
 from pptx import Presentation
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -77,7 +81,8 @@ class ReportService:
             status=report_in.status,
             summary=report_in.summary,
             content_markdown=report_in.content_markdown,
-            storage_ref=report_in.storage_ref
+            storage_ref=report_in.storage_ref,
+            images=report_in.chart_images if report_in.chart_images else [],  # NEW: persist chart_images
         )
         session.add(r)
         await session.commit()
@@ -134,6 +139,7 @@ class ReportService:
         title: str,
         content_markdown: Optional[str] = None,
         summary: Optional[str] = None,
+        chart_images: Optional[List[Dict[str, str]]] = None,  # NEW parameter
     ) -> Report:
         report_in = ReportCreate(
             task_id=task_id,
@@ -141,6 +147,7 @@ class ReportService:
             status="published",
             content_markdown=content_markdown,
             summary=summary or (content_markdown[:200] if content_markdown else None),
+            chart_images=chart_images,  # NEW: pass chart_images
         )
         return await self.create_report(session, report_in)
 
@@ -273,7 +280,7 @@ class ReportService:
         
         return formatted_results
 
-    def generate_docx(self, report: Report) -> bytes:
+    def generate_docx(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
         """从 Markdown 报告生成 DOCX 文件，标题层级自动映射为 Word 样式"""
         doc = docx.Document()
         doc.add_heading(report.title, 0)
@@ -292,12 +299,18 @@ class ReportService:
                 doc.add_heading(line[4:], 3)
             else:
                 doc.add_paragraph(line)
+        if chart_images:
+            doc.add_heading("数据可视化图表", 1)
+            for ci in chart_images:
+                doc.add_heading(ci.get("title", "图表"), 2)
+                img_data = io.BytesIO(base64.b64decode(ci["base64"]))
+                doc.add_picture(img_data, width=docx.shared.Inches(5))
         buf = io.BytesIO()
         doc.save(buf)
         buf.seek(0)
         return buf.getvalue()
 
-    def generate_pptx(self, report: Report) -> bytes:
+    def generate_pptx(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
         prs = Presentation()
         title_slide_layout = prs.slide_layouts[0]
         slide = prs.slides.add_slide(title_slide_layout)
@@ -330,6 +343,14 @@ class ReportService:
                     continue
                 p = tf.add_paragraph()
                 p.text = line
+
+        if chart_images:
+            blank_layout = prs.slide_layouts[6]
+            for ci in chart_images:
+                slide = prs.slides.add_slide(blank_layout)
+                img_data = io.BytesIO(base64.b64decode(ci["base64"]))
+                slide.shapes.add_picture(img_data, docx.shared.Inches(1), docx.shared.Inches(1.5),
+                                         width=docx.shared.Inches(8))
 
         buf = io.BytesIO()
         prs.save(buf)
@@ -374,7 +395,7 @@ class ReportService:
 
         return styles
 
-    def generate_pdf(self, report: Report) -> bytes:
+    def generate_pdf(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
         """从 Markdown 报告生成 PDF 文件，支持中文字体"""
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=54, rightMargin=54, topMargin=54, bottomMargin=54)
@@ -404,6 +425,25 @@ class ReportService:
                 story.append(Paragraph(line, body_style))
                 story.append(Spacer(1, 4))
 
+        if chart_images:
+            story.append(Paragraph("数据可视化图表", h1_style))
+            for ci in chart_images:
+                story.append(Paragraph(ci.get("title", "图表"), h2_style))
+                img_data = io.BytesIO(base64.b64decode(ci["base64"]))
+                
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp.write(img_data.getvalue())
+                    tmp.flush()
+                    tmp_path = tmp.name
+                try:
+                    story.append(RLImage(tmp_path, width=400, height=250))
+                    story.append(Spacer(1, 10))
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
         doc.build(story)
         buf.seek(0)
         return buf.getvalue()
@@ -424,14 +464,24 @@ class ReportService:
         if not r:
             raise ValueError("Report not found")
 
+        chart_images = r.images if isinstance(r.images, list) else []
+
         fmt = fmt.lower()
         if fmt == "docx":
-            return f"report_{r.id}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", self.generate_docx(r)
+            data = self.generate_docx(r, chart_images=chart_images)
+            result = (f"report_{r.id}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", data)
         elif fmt == "pdf":
-            return f"report_{r.id}.pdf", "application/pdf", self.generate_pdf(r)
+            data = self.generate_pdf(r, chart_images=chart_images)
+            result = (f"report_{r.id}.pdf", "application/pdf", data)
         elif fmt == "pptx":
-            return f"report_{r.id}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", self.generate_pptx(r)
+            data = self.generate_pptx(r, chart_images=chart_images)
+            result = (f"report_{r.id}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", data)
         elif fmt == "md" or fmt == "markdown":
-            return f"report_{r.id}.md", "text/markdown", self.generate_markdown(r)
+            result = (f"report_{r.id}.md", "text/markdown", self.generate_markdown(r))
         else:
             raise ValueError("Unsupported format. Use docx, pdf, pptx, or md.")
+
+        if r.content_markdown:
+            asyncio.create_task(self._embed_and_store(r.id, r.content_markdown))
+
+        return result

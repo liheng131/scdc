@@ -15,6 +15,7 @@ from app.models.template import Template
 from app.models.notification import NotificationRule
 from app.models.event_rule import EventRule
 from app.models.ai_model_config import AiModelConfig
+from app.models.workflow_run import WorkflowRun
 
 __all__ = [
     "Base",
@@ -28,5 +29,6 @@ __all__ = [
     "Template",
     "NotificationRule",
     "EventRule",
-    "AiModelConfig"
+    "AiModelConfig",
+    "WorkflowRun"
 ]

@@ -48,12 +48,21 @@ class CollectorAgent:
         )
         search_resp = await self.search_service.search(search_req)
 
-        if not search_resp.success or not search_resp.results:
-            logger.warning(f"Search failed or returned empty for topic '{input_data.topic}'.")
+        if not search_resp.success:
+            logger.warning(f"SerpAPI search failed for topic '{input_data.topic}': {search_resp.error}")
             return CollectorOutput(
                 task_id=input_data.task_id,
-                success=True,  # 空结果也是一种正常的降级返回，不算失败
-                items=[]
+                success=False,
+                error=f"SerpAPI search failed: {search_resp.error}"
+            )
+
+        if not search_resp.results:
+            logger.warning(f"Search returned empty results for topic '{input_data.topic}'.")
+            return CollectorOutput(
+                task_id=input_data.task_id,
+                success=True,
+                items=[],
+                warning="no_results"
             )
 
         top_results = search_resp.results[:input_data.max_items]

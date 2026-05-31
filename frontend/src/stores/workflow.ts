@@ -9,6 +9,9 @@ interface ChatMessage {
   stageHint?: string;
   chartOptions?: any[];
   reportMarkdown?: string;
+  stageStats?: { label: string; before: number; after?: number; icon: string }[];
+  degraded?: boolean;
+  partialStats?: { label: string; count: string; icon: string }[];
 }
 
 interface Conversation {
@@ -160,9 +163,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
       }
     });
 
-    es.addEventListener('stage_complete', () => {
+    es.addEventListener('stage_complete', (e: any) => {
+      const data = JSON.parse(e.data);
       if (streamCallbacks.value.onStageComplete) {
-        streamCallbacks.value.onStageComplete({});
+        streamCallbacks.value.onStageComplete(data);
       }
     });
 
@@ -198,11 +202,26 @@ export const useWorkflowStore = defineStore('workflow', () => {
             content = md.replace(/\n/g, '<br>');
           }
         }
+
+        const stageStats: ChatMessage['stageStats'] = [];
+        if (data.collected_count !== undefined) {
+          stageStats.push({ label: '搜索信息', before: data.collected_count, icon: '🔍' });
+        }
+        if (data.cleaned_count !== undefined) {
+          stageStats.push({ label: '整理数据', before: data.collected_count, after: data.cleaned_count, icon: '🧹' });
+        }
+        if (data.insight_count !== undefined) {
+          stageStats.push({ label: '分析洞察', before: data.insight_count, icon: '🧠' });
+        }
+        stageStats.push({ label: '生成报告', before: 1, icon: '📝' });
+
         updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
           content,
           reportMarkdown: md,
           chartOptions: data.chart_configs || [],
           stageHint: '',
+          stageStats,
+          degraded: !!(data.result && data.result.degraded),
         });
         if (activeConvIdForStream.value) {
           updateConversationStatus(activeConvIdForStream.value, 'completed');
@@ -212,14 +231,38 @@ export const useWorkflowStore = defineStore('workflow', () => {
     });
 
     es.addEventListener('error', (e: any) => {
+      let parsedData: any = null;
+      try {
+        parsedData = JSON.parse(e.data);
+      } catch {
+        parsedData = { error: '连接异常' };
+      }
+
       if (streamCallbacks.value.onError) {
-        try {
-          const data = JSON.parse(e.data);
-          streamCallbacks.value.onError(data);
-        } catch {
-          streamCallbacks.value.onError({ error: '连接异常' });
+        streamCallbacks.value.onError(parsedData);
+      }
+
+      if (activeConvIdForStream.value && activeAssistantIdxForStream.value >= 0 && parsedData.partial_results) {
+        const pr = parsedData.partial_results;
+        const partialStats: ChatMessage['partialStats'] = [];
+        if (pr.collected_count !== undefined) {
+          partialStats.push({ label: '数据采集', count: `收集了 ${pr.collected_count} 条资讯`, icon: '🔍' });
+        }
+        if (pr.cleaned_count !== undefined) {
+          partialStats.push({ label: '数据清洗', count: `保留了 ${pr.cleaned_count} 条有效数据`, icon: '🧹' });
+        }
+        if (pr.insight_count !== undefined) {
+          partialStats.push({ label: 'AI分析', count: `生成了 ${pr.insight_count} 条洞察`, icon: '🧠' });
+        }
+        updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
+          stageHint: '',
+          partialStats,
+        });
+        if (activeConvIdForStream.value) {
+          updateConversationStatus(activeConvIdForStream.value, 'failed');
         }
       }
+
       clearEventSource();
     });
 

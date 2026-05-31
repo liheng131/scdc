@@ -92,3 +92,6 @@ class HTTPCrawler(BaseCrawler):
                 status_code=status_code,
                 error=str(e)
             )
+
+
+            

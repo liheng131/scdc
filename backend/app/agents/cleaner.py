@@ -33,6 +33,49 @@ class CleanerAgent:
         normalized = "".join(text.split()).lower()
         return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
+    def _is_garbled_content(self, text: str) -> bool:
+        """
+        检测非人类可读的乱码/二进制内容
+        返回 True 表示内容是乱码或不可读的，应被过滤
+        """
+        if not text:
+            return False
+
+        # 检测 PDF 原始二进制标记
+        if text.startswith("%PDF"):
+            return True
+
+        # 检测 ZIP/原始二进制标记 (PK\x03\x04)
+        if text.startswith("PK\x03\x04"):
+            return True
+
+        # 统计控制字符和可打印字符
+        total_chars = len(text)
+        if total_chars == 0:
+            return False
+
+        control_char_count = 0
+        printable_char_count = 0
+
+        for char in text:
+            code = ord(char)
+            # 控制字符：ASCII < 32，但排除 \n (10), \r (13), \t (9)
+            if code < 32 and code not in (9, 10, 13):
+                control_char_count += 1
+            # 可打印字符：ASCII 32-126 以及常见的 Unicode 字符
+            elif 32 <= code <= 126 or code > 126:
+                printable_char_count += 1
+
+        # 如果控制字符超过 50%，认为是乱码
+        if control_char_count / total_chars > 0.5:
+            return True
+
+        # 如果可打印字符比例低于 70%，认为是乱码
+        if printable_char_count / total_chars < 0.7:
+            return True
+
+        return False
+
     def _chunk_text(self, text: str) -> List[str]:
         """
         将文本按 max_chunk_size 分块
@@ -73,8 +116,14 @@ class CleanerAgent:
         removed_count = 0
 
         for item in input_data.raw_items:
-            # ① 过滤过短的低质内容
+            # 0 乱码/非可读内容过滤
             clean_text = item.content.strip()
+            if self._is_garbled_content(clean_text):
+                removed_count += 1
+                logger.warning(f"Removed item '{item.title}': garbled/non-readable content detected")
+                continue
+
+            # ① 过滤过短的低质内容
             if len(clean_text) < self.min_content_length:
                 removed_count += 1
                 logger.debug(f"Removed item '{item.title}': too short ({len(clean_text)} chars)")

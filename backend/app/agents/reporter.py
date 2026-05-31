@@ -7,12 +7,32 @@ ReporterAgent（报告生成 Agent）
 - 生成 ECharts 饼图配置，展示洞察维度分布
 """
 
+import base64
 import datetime
+import io
 import json
 import logging
+import os
 import traceback
 from typing import List, Dict, Any, Tuple
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# Configure Chinese font support
+_font_paths = [
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # WenQuanYi Micro Hei
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",     # WenQuanYi Zen Hei
+]
+for _fp in _font_paths:
+    if os.path.exists(_fp):
+        fm.fontManager.addfont(_fp)
+        matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei']
+        matplotlib.rcParams['axes.unicode_minus'] = False
+        break
+del _font_paths, _fp
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -197,13 +217,15 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 
     def _generate_chart_configs(self, topic: str, insights: List[Insight]) -> List[Dict[str, Any]]:
         dim_counts: Dict[str, int] = {}
+        dim_confidences: Dict[str, List[float]] = {}
         for insight in insights:
-            dim = insight.dimension or ""
+            dim = insight.dimension or "未分类"
             dim_counts[dim] = dim_counts.get(dim, 0) + 1
+            dim_confidences.setdefault(dim, []).append(insight.confidence)
 
-        chart_data = [{"name": k or "未分类", "value": v} for k, v in dim_counts.items()]
+        chart_data = [{"name": k, "value": v} for k, v in dim_counts.items()]
 
-        option = {
+        pie_option = {
             "title": {"text": f"分析维度分布 - {topic}", "left": "center"},
             "tooltip": {"trigger": "item"},
             "legend": {"orient": "vertical", "left": "left"},
@@ -223,7 +245,50 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 }
             ],
         }
-        return [option]
+
+        dim_names = list(dim_counts.keys())
+        avg_confidences = [
+            sum(dim_confidences.get(d, [0])) / max(len(dim_confidences.get(d, [])), 1)
+            for d in dim_names
+        ]
+
+        bar_option = {
+            "title": {"text": f"各维度置信度分布 - {topic}", "left": "center"},
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": dim_names, "axisLabel": {"rotate": 30}},
+            "yAxis": {"type": "value", "name": "平均置信度", "min": 0, "max": 1},
+            "series": [{"data": avg_confidences, "type": "bar", "itemStyle": {"color": "#5470c6"}}]
+        }
+
+        return [pie_option, bar_option]
+
+    def _render_chart_to_base64(self, chart_configs: List[Dict]) -> List[Dict[str, str]]:
+        images = []
+        for cfg in chart_configs:
+            title = cfg.get("title", {}).get("text", "Chart")
+            fig, ax = plt.subplots(figsize=(8, 5))
+            series_list = cfg.get("series", [])
+            for series in series_list:
+                if series.get("type") == "pie":
+                    data_items = series.get("data", [])
+                    labels = [d.get("name", "") for d in data_items]
+                    values = [d.get("value", 0) for d in data_items]
+                    if labels and values:
+                        ax.pie(values, labels=labels, autopct='%1.1f%%')
+                elif series.get("type") == "bar":
+                    x_data = cfg.get("xAxis", {}).get("data", [])
+                    y_data = series.get("data", [])
+                    if x_data and y_data:
+                        ax.bar(x_data, y_data)
+                        ax.set_ylabel(cfg.get("yAxis", {}).get("name", ""))
+            ax.set_title(title)
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            buf.seek(0)
+            b64 = base64.b64encode(buf.read()).decode()
+            images.append({"title": title, "base64": b64})
+        return images
 
     def _build_template_report(
         self,
@@ -286,6 +351,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             if input_data.include_charts and insights
             else []
         )
+        chart_images = self._render_chart_to_base64(chart_configs) if chart_configs else []
 
         sections: List[ReportSection] = []
 
@@ -312,6 +378,9 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         ref_parts.append(f"[^{idx}]: [{uri}]({uri})\n")
 
                     full_markdown = header_md + llm_report.strip() + "\n".join(ref_parts)
+                    if chart_images:
+                        for ci in chart_images:
+                            full_markdown += f"\n\n![{ci['title']}](data:image/png;base64,{ci['base64']})"
                     sections.append(ReportSection(title="完整报告", content=full_markdown))
 
                     logger.info(
@@ -324,6 +393,8 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         markdown_report=full_markdown,
                         sections=sections,
                         chart_configs=chart_configs,
+                        chart_images=chart_images,
+                        degraded=False,
                     )
                 else:
                     logger.warning(
@@ -339,6 +410,9 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         full_markdown = self._build_template_report(
             input_data.topic, summary, insights, evidence_map, reference_list
         )
+        if chart_images:
+            for ci in chart_images:
+                full_markdown += f"\n\n![{ci['title']}](data:image/png;base64,{ci['base64']})"
         sections.append(ReportSection(title="完整报告", content=full_markdown))
 
         logger.info(
@@ -351,4 +425,6 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             markdown_report=full_markdown,
             sections=sections,
             chart_configs=chart_configs,
+            chart_images=chart_images,
+            degraded=True,
         )

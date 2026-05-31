@@ -6,7 +6,7 @@
 version 字段支持报告版本管理，draft/published/archived 状态用于发布工作流。
 """
 
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -25,6 +25,7 @@ class ReportCreate(BaseModel):
     content_markdown: Optional[str] = None
     storage_ref: Optional[str] = None
     images: Optional[List[ReportImageItem]] = None
+    chart_images: Optional[List[Dict[str, str]]] = None  # [{"title": str, "base64": str}]
 
 class ReportUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)

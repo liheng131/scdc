@@ -15,3 +15,4 @@ export * from './services/templates';
 export * from './services/dataSources';
 export { collectedRecordsApi, type CollectedRecordInfo } from './services/dataSources';
 export { workflowApi, type WorkflowStartRequest, type WorkflowStartResponse, type WorkflowStatusResponse } from './services/workflow';
+export { metricsApi, type MetricsData } from './services/metrics';
