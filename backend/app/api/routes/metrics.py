@@ -1,84 +1,130 @@
 from fastapi import APIRouter
-from prometheus_client import REGISTRY, Counter, Histogram
+from prometheus_client import REGISTRY
 from app.api.responses import success_response, ResponseModel
 import psutil
-import os
-import threading
 import time
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-_last_sample: dict = {"time": time.time(), "count": 0}
+_last_sample: dict = {"time": 0.0, "count": 0.0, "initialized": False}
 
-def _get_metric_value(name: str, labels: dict = None) -> float:
-    for metric in REGISTRY.collect():
-        if metric.name == name:
-            for sample in metric.samples:
-                if labels is None or all(sample.labels.get(k) == v for k, v in (labels or {}).items()):
-                    return sample.value
-    return 0
+def _get_counter_total(name: str, extra_labels: dict = None) -> float:
+    full_name = f"{name}_total" if not name.endswith("_total") else name
+    for metric_family in REGISTRY.collect():
+        for s in metric_family.samples:
+            if s.name == full_name:
+                if extra_labels is None or all(
+                    s.labels.get(k) == v for k, v in extra_labels.items()
+                ):
+                    return s.value
+    return 0.0
 
-def _get_histogram_quantile(name: str, quantile: float, labels: dict = None) -> float:
-    for metric in REGISTRY.collect():
-        if metric.name == name:
-            for sample in metric.samples:
-                if sample.labels.get('quantile', '') == str(quantile):
-                    if labels is None or all(sample.labels.get(k) == v for k, v in (labels or {}).items() if k != 'quantile'):
-                        return sample.value
-    return 0
+def _get_histogram_quantile_approx(name: str, quantile: float) -> float:
+    count_name = f"{name}_count"
+    count_val = 0.0
+    buckets = []
+
+    for metric_family in REGISTRY.collect():
+        for s in metric_family.samples:
+            if s.name == count_name:
+                count_val = s.value
+            elif s.name == f"{name}_bucket":
+                le = s.labels.get("le")
+                if le is not None and le != "+Inf":
+                    buckets.append((float(le), s.value))
+
+    if count_val <= 0 or not buckets:
+        return 0.0
+
+    target = count_val * quantile
+    buckets.sort()
+    for le, cumulative in buckets:
+        if cumulative >= target:
+            return le
+
+    if buckets:
+        return buckets[-1][0]
+    return 0.0
+
+def _collect_endpoint_latency() -> list:
+    sums = {}
+    counts = {}
+    for metric_family in REGISTRY.collect():
+        for s in metric_family.samples:
+            if s.name == "http_request_duration_seconds_sum":
+                handler = s.labels.get("handler", "")
+                method = s.labels.get("method", "")
+                if handler and handler not in ("/metrics", "/api/v1/metrics", "/api/v1/metrics-json/json"):
+                    key = f"{method} {handler}"
+                    sums[key] = s.value
+            elif s.name == "http_request_duration_seconds_count":
+                handler = s.labels.get("handler", "")
+                method = s.labels.get("method", "")
+                if handler and handler not in ("/metrics", "/api/v1/metrics", "/api/v1/metrics-json/json"):
+                    key = f"{method} {handler}"
+                    counts[key] = s.value
+
+    endpoint_latency = []
+    for key in sums:
+        if key in counts and counts[key] > 0:
+            avg_ms = (sums[key] / counts[key]) * 1000
+            endpoint_latency.append({"endpoint": key, "avg_ms": round(avg_ms, 2)})
+
+    endpoint_latency.sort(key=lambda x: x["avg_ms"], reverse=True)
+    return endpoint_latency[:10]
 
 @router.get("/json", response_model=ResponseModel)
 async def get_metrics_json():
     global _last_sample
 
-    total_count = _get_metric_value("http_requests_total", {"method": "GET"}) + \
-                  _get_metric_value("http_requests_total", {"method": "POST"}) + \
-                  _get_metric_value("http_requests_total", {"method": "PUT"}) + \
-                  _get_metric_value("http_requests_total", {"method": "DELETE"})
+    if not _last_sample["initialized"]:
+        initial_count = sum(
+            _get_counter_total("http_requests_total", {"method": m})
+            for m in ["GET", "POST", "PUT", "DELETE"]
+        )
+        _last_sample = {"time": time.time(), "count": initial_count, "initialized": True}
+
+    total_count = sum(
+        _get_counter_total("http_requests_total", {"method": m})
+        for m in ["GET", "POST", "PUT", "DELETE"]
+    )
 
     now = time.time()
     elapsed = now - _last_sample["time"]
-    rps = (total_count - _last_sample["count"]) / elapsed if elapsed > 0 else 0
-    _last_sample = {"time": now, "count": total_count}
+    delta = total_count - _last_sample["count"]
+    rps = delta / elapsed if elapsed > 0 else 0
+    _last_sample["time"] = now
+    _last_sample["count"] = total_count
 
-    latency_p50 = _get_histogram_quantile("http_request_duration_seconds", 0.5) * 1000
-    latency_p95 = _get_histogram_quantile("http_request_duration_seconds", 0.95) * 1000
+    latency_p50 = _get_histogram_quantile_approx("http_request_duration_seconds", 0.5) * 1000
+    latency_p95 = _get_histogram_quantile_approx("http_request_duration_seconds", 0.95) * 1000
 
     status_codes = {}
     error_count_5xx = 0
-    for metric in REGISTRY.collect():
-        if metric.name == "http_requests_total":
-            for sample in metric.samples:
-                code = sample.labels.get("status", "")
+    for metric_family in REGISTRY.collect():
+        for s in metric_family.samples:
+            if s.name == "http_requests_total":
+                code = s.labels.get("status", "")
                 if code:
-                    status_codes[code] = status_codes.get(code, 0) + int(sample.value)
+                    status_codes[code] = status_codes.get(code, 0) + int(s.value)
                     if code.startswith("5"):
-                        error_count_5xx += int(sample.value)
+                        error_count_5xx += int(s.value)
 
     error_rate = (error_count_5xx / total_count * 100) if total_count > 0 else 0
-
-    endpoint_latency = []
-    for metric in REGISTRY.collect():
-        if metric.name == "http_request_duration_seconds_sum":
-            for sample in metric.samples:
-                handler = sample.labels.get("handler", "")
-                method = sample.labels.get("method", "")
-                if handler and handler != "/metrics" and handler != "/api/v1/metrics":
-                    count_val = _get_metric_value("http_request_duration_seconds_count",
-                        {"handler": handler, "method": method})
-                    if count_val > 0:
-                        avg_ms = (sample.value / count_val) * 1000
-                        endpoint_latency.append({
-                            "endpoint": f"{method} {handler}",
-                            "avg_ms": round(avg_ms, 2)
-                        })
-
-    endpoint_latency.sort(key=lambda x: x["avg_ms"], reverse=True)
-    endpoint_latency = endpoint_latency[:10]
+    endpoint_latency = _collect_endpoint_latency()
 
     cpu_percent = psutil.cpu_percent(interval=0.5)
     memory = psutil.virtual_memory()
     memory_percent = memory.percent
+
+    health_score = max(0, min(100, round(100 - error_rate * 10 - latency_p95 / 10, 1)))
+
+    logger.info(
+        "Metrics snapshot: total=%d rps=%.2f p50=%.1fms p95=%.1fms err_rate=%.2f%% cpu=%.1f%% mem=%.1f%%",
+        int(total_count), rps, latency_p50, latency_p95, error_rate, cpu_percent, memory_percent,
+    )
 
     return success_response(data={
         "total_requests": int(total_count),
@@ -90,5 +136,5 @@ async def get_metrics_json():
         "endpoint_latency": endpoint_latency,
         "cpu_percent": cpu_percent,
         "memory_percent": memory_percent,
-        "health_score": round(100 - error_count_5xx - (latency_p95 / 100), 1) if total_count > 0 else 100,
+        "health_score": health_score,
     })
