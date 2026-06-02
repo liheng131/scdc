@@ -13,7 +13,7 @@ Schema 层级关系：
 - 阶段间数据格式变化被 Pydantic 强制校验，避免类型错误在串联时传播
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 import uuid
 from datetime import datetime
@@ -134,6 +134,9 @@ class OrchestratorInput(BaseModel):
     min_content_length: int = 20
     include_charts: bool = True
     dimensions: List[str] = Field(default_factory=list)
+    start_stage: Optional[str] = None
+    reentry_context: Optional[str] = None
+    previous_output: Optional[Dict[str, Any]] = None
 
 class OrchestratorOutput(BaseModel):
     task_id: str
@@ -147,3 +150,23 @@ class OrchestratorOutput(BaseModel):
     reporter_output: Optional[ReporterOutput] = None
     error_message: Optional[str] = None
     partial_results: Optional[Dict[str, Any]] = None
+
+# ============================================================
+# Intent Classification（意图分类）阶段
+# ============================================================
+
+IntentType = Literal["market_insight", "general_question", "workflow_reentry"]
+
+
+class IntentResult(BaseModel):
+    intent_type: IntentType
+    target_stage: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reasoning: str = ""
+    user_feedback: str = ""
+
+
+class ReentryRequest(BaseModel):
+    workflow_id: str
+    target_stage: str
+    user_feedback: str = ""

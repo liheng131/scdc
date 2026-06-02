@@ -276,7 +276,9 @@ const handleExportReport = async (markdown: string, fmt: string) => {
 
   const exportUrl = reportsApi.exportReportUrl(reportId, fmt);
   try {
-    const response = await fetch(exportUrl);
+    const response = await fetch(exportUrl, {
+      headers: reportsApi.getExportHeaders(),
+    });
     if (!response.ok) throw new Error('下载失败');
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);

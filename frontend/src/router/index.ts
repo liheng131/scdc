@@ -64,12 +64,6 @@ const router = createRouter({
           meta: { title: '智能报告 Reports' },
         },
         {
-          path: 'templates',
-          name: 'templates',
-          component: () => import('../views/TemplatesView.vue'),
-          meta: { title: '大纲模板管理 Templates' },
-        },
-        {
           path: 'settings',
           name: 'settings',
           component: () => import('../views/SettingsView.vue'),

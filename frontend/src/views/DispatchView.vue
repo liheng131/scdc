@@ -2,12 +2,12 @@
 import { reactive, ref, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Check } from '@element-plus/icons-vue';
-import { settingsApi } from '../api/services/settings';
+import { settingsApi, type DispatchConfig } from '../api/services/settings';
 
 const config = reactive({
   cronSchedule: '0 8 * * *',
-  notificationEmail: 'executive@market-insight.internal',
-  webhookUrl: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=e0b...c31',
+  notificationEmail: '',
+  webhookUrl: '',
 });
 
 const loading = ref(false);
@@ -17,7 +17,12 @@ onMounted(async () => {
   loading.value = true;
   fetchError.value = '';
   try {
-    await settingsApi.getSettings();
+    const res = await settingsApi.getDispatchConfig();
+    if (res.data) {
+      config.cronSchedule = res.data.cron_schedule || '0 8 * * *';
+      config.notificationEmail = res.data.notification_email || '';
+      config.webhookUrl = res.data.webhook_url || '';
+    }
   } catch (e: any) {
     fetchError.value = e?.message || '加载调度配置失败';
     ElMessage.error(fetchError.value);
@@ -27,10 +32,18 @@ onMounted(async () => {
 });
 
 const handleSave = async () => {
+  loading.value = true;
   try {
+    await settingsApi.saveDispatchConfig({
+      cron_schedule: config.cronSchedule,
+      notification_email: config.notificationEmail,
+      webhook_url: config.webhookUrl,
+    });
     ElMessage.success('自动化调度与分发通道配置已保存');
   } catch {
     ElMessage.error('配置保存失败，请稍后重试');
+  } finally {
+    loading.value = false;
   }
 };
 </script>
@@ -41,7 +54,7 @@ const handleSave = async () => {
       <template #header>
         <div class="card-header">
           <span class="card-title">自动化调度与分发通道</span>
-          <el-button type="primary" :icon="Check" @click="handleSave">保存变更</el-button>
+          <el-button type="primary" :icon="Check" :loading="loading" @click="handleSave">保存变更</el-button>
         </div>
       </template>
 

@@ -123,7 +123,9 @@ const handleDelete = async (row: ReportInfo) => {
 const handleExport = async (row: ReportInfo, fmt: string) => {
   try {
     const url = reportsApi.exportReportUrl(row.id, fmt)
-    const response = await fetch(url)
+    const response = await fetch(url, {
+      headers: reportsApi.getExportHeaders(),
+    })
     if (!response.ok) throw new Error('下载失败')
     const blob = await response.blob()
     const objectUrl = URL.createObjectURL(blob)

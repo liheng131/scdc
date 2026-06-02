@@ -45,7 +45,15 @@ const formData = reactive({
   api_key: '',
 })
 
-const testingIds = reactive<Set<number>>(new Set())
+const testingIds = ref<Set<number>>(new Set())
+
+const formRules = {
+  base_url: (url: string): string | null => {
+    if (!url.trim()) return '请输入服务地址'
+    if (!/^https?:\/\//i.test(url.trim())) return '服务地址必须以 http:// 或 https:// 开头'
+    return null
+  },
+}
 
 const fetchModels = async () => {
   loading.value = true
@@ -103,8 +111,9 @@ const handleSave = async () => {
     ElMessage.warning('请输入模型名')
     return
   }
-  if (!formData.base_url.trim()) {
-    ElMessage.warning('请输入服务地址')
+  const urlError = formRules.base_url(formData.base_url)
+  if (urlError) {
+    ElMessage.warning(urlError)
     return
   }
 
@@ -169,22 +178,41 @@ const handleSetDefault = async (row: AiModelConfig) => {
 }
 
 const handleTestConnection = async (row: AiModelConfig) => {
-  testingIds.add(row.id)
+  testingIds.value.add(row.id)
   try {
     const res = await settingsApi.testAiModel(row.id)
     if (res.data?.status === 'ok') {
-      ElMessage.success(`连接成功！模型 "${row.model_name}" 可正常使用`)
+      const details: string[] = []
+      if (res.data.message) details.push(`模型回复: "${res.data.message}"`)
+      if (res.data.dimension) details.push(`向量维度: ${res.data.dimension}`)
+      if (res.data.result_count !== undefined) details.push(`返回结果: ${res.data.result_count} 条`)
+      const successMsg = details.length > 0
+        ? `连接成功！${details.join('，')}`
+        : `连接成功！模型 "${row.model_name}" 可正常使用`
+      ElMessage.success(successMsg)
     } else {
       ElMessage.warning(`连接失败: ${res.data?.error || '未知错误'}`)
     }
   } catch (e: any) {
-    ElMessage.error('测试连接请求失败，请检查后端服务')
+    // axios 拦截器已显示错误消息（ElMessage.error），此处不再重复显示
+    // 仅处理网络异常拦截器可能未覆盖的情况
+    if (e?.response?.status) {
+      const status = e.response.status
+      const detail = e.response.data?.detail || e.response.data?.msg || ''
+      if (status >= 400 && status < 600) {
+        // 错误已由拦截器处理，不重复显示
+      } else {
+        ElMessage.error(`测试连接请求失败 (${status}): ${detail}`)
+      }
+    } else if (e?.message) {
+      // 非 HTTP 错误（如 axios 自身错误），已在拦截器显示，避免重复
+    }
   } finally {
-    testingIds.delete(row.id)
+    testingIds.value.delete(row.id)
   }
 }
 
-const isTesting = (id: number) => testingIds.has(id)
+const isTesting = (id: number) => testingIds.value.has(id)
 
 onMounted(() => {
   fetchModels()

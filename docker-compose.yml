@@ -201,6 +201,12 @@ services:
         condition: service_healthy  # 等待 PostgreSQL 健康后再启动
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   # Frontend：Vue 前端应用，通过 Nginx 提供静态资源和反向代理
@@ -216,7 +222,8 @@ services:
     networks:
       - scdc_net
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy  # 等待后端服务健康后再开始代理
     restart: unless-stopped
 
   # ===== 监控层 =====

@@ -18,6 +18,8 @@ from app.core.db import async_session_factory
 from app.models.workflow_run import WorkflowRun
 from app.agents.orchestrator import OrchestratorAgent
 from app.schemas.agent import OrchestratorInput
+from app.services.intent_classifier import IntentClassifier
+from app.services.direct_response import DirectResponseService
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +50,20 @@ class WorkflowState:
         self.error: Optional[str] = None
         self.stages: Dict[str, Any] = {}
         self.result: Optional[Dict[str, Any]] = None
+        self.is_direct_response: bool = False
 
 class WorkflowService:
     def __init__(self):
         self._workflows: Dict[str, WorkflowState] = {}
+        self._intent_classifier = IntentClassifier()
+        self._direct_response = DirectResponseService()
+
+    async def _classify_intent(self, message: str, conversation_history: list = None, has_existing_report: bool = False) -> dict:
+        return await self._intent_classifier.classify(message, conversation_history, has_existing_report)
+
+    async def run_direct_response_stream(self, message: str, conversation_history: list = None) -> AsyncGenerator[str, None]:
+        async for chunk in self._direct_response.generate_response_stream(message, conversation_history):
+            yield chunk
 
     async def create_workflow(self, topic: str, max_items: int, dimensions: list = None) -> WorkflowState:
         wf_id = str(uuid.uuid4())[:8]
@@ -123,7 +135,19 @@ class WorkflowService:
         except Exception as e:
             logger.warning("Failed to persist stage update for %s: %s", state.workflow_id, e)
 
-    async def run_workflow_stream(self, state: WorkflowState) -> AsyncGenerator[str, None]:
+    async def run_workflow_stream(self, state: WorkflowState, start_stage: str = None, reentry_context: str = None) -> AsyncGenerator[str, None]:
+        if state.is_direct_response:
+            state.status = "running"
+            state.current_stage = "direct_response"
+            await self._persist_stage_update(state)
+
+            async for chunk in self._direct_response.generate_response_stream(state.topic, workflow_id=state.workflow_id):
+                yield chunk
+
+            state.status = "completed"
+            await self._persist_stage_update(state)
+            return
+
         queue = asyncio.Queue()
         stage_idx_map = {s: i for i, s in enumerate(STAGE_SEQUENCE)}
 
@@ -139,6 +163,8 @@ class WorkflowService:
                 max_items=state.max_items,
                 dimensions=state.dimensions,
                 include_charts=True,
+                start_stage=start_stage,
+                reentry_context=reentry_context,
             ))
 
         task = asyncio.ensure_future(run_orch())
@@ -197,6 +223,7 @@ class WorkflowService:
             state.result = {
                 "report_markdown": reporter.markdown_report if reporter else "",
                 "chart_configs": reporter.chart_configs if reporter else [],
+                "chart_images": reporter.chart_images if reporter else [],
                 "sections": [{"title": s.title, "content": s.content} for s in (reporter.sections if reporter else [])],
             }
             state.stages = {
@@ -228,7 +255,7 @@ class WorkflowService:
                             title=state.topic,
                             content_markdown=report_data.get("report_markdown", ""),
                             summary=report_data.get("report_markdown", "")[:200] if report_data.get("report_markdown") else None,
-                            chart_images=report_data.get("chart_configs", []),  # NEW: pass chart_images
+                            chart_images=report_data.get("chart_images", []),
                         )
                         report_id = report.id
                         logger.info("Auto-saved report for workflow %s, report_id=%s", state.workflow_id, report_id)
@@ -254,6 +281,21 @@ class WorkflowService:
             yield self._sse("error", {"error": str(e)[:500]})
 
     
+
+    async def run_reentry_stream(self, original_workflow_id: str, target_stage: str, user_feedback: str, topic: str) -> AsyncGenerator[str, None]:
+        original_state = await self.get_workflow(original_workflow_id)
+        previous_output = original_state.stages if original_state else {}
+        if original_state and original_state.result:
+            previous_output = {**previous_output, "result": original_state.result}
+
+        state = await self.create_workflow(topic=topic, max_items=5, dimensions=[])
+
+        stage_idx_map = {s: i for i, s in enumerate(STAGE_SEQUENCE)}
+        start_idx = stage_idx_map.get(target_stage, 0)
+        visible_stages = STAGE_SEQUENCE[start_idx:]
+
+        async for sse_event in self.run_workflow_stream(state, start_stage=target_stage, reentry_context=user_feedback):
+            yield sse_event
 
     def _sse(self, event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"

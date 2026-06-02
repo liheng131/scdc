@@ -138,3 +138,22 @@ async def get_metrics_json():
         "memory_percent": memory_percent,
         "health_score": health_score,
     })
+
+@router.get("/debug")
+async def debug_metrics():
+    """调试端点：返回 REGISTRY 中的所有 HTTP 相关样本"""
+    result = []
+    for metric_family in REGISTRY.collect():
+        for s in metric_family.samples:
+            if "http" in s.name.lower() or "request" in s.name.lower():
+                result.append({
+                    "name": s.name,
+                    "labels": s.labels,
+                    "value": s.value,
+                })
+    return {"samples": result}
+
+@router.get("/ping")
+async def ping():
+    import time
+    return {"status": "ok", "timestamp": time.time(), "version": "v2"}

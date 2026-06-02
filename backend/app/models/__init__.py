@@ -11,7 +11,6 @@ from app.models.data_source import DataSource
 from app.models.collected_record import CollectedRecord
 from app.models.task import Task, TaskRun
 from app.models.report import Report
-from app.models.template import Template
 from app.models.notification import NotificationRule
 from app.models.event_rule import EventRule
 from app.models.ai_model_config import AiModelConfig
@@ -26,7 +25,6 @@ __all__ = [
     "Task",
     "TaskRun",
     "Report",
-    "Template",
     "NotificationRule",
     "EventRule",
     "AiModelConfig",

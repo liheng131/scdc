@@ -1,4 +1,6 @@
 from typing import Any, Optional
+import json
+import os
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +16,62 @@ from app.models.ai_model_config import AiModelConfig
 from app.models.user import User
 
 router = APIRouter()
+
+
+# ===== Dispatch Config (cron, email, webhook) =====
+
+_DISPATCH_CONFIG = {
+    "cron_schedule": "0 8 * * *",
+    "notification_email": "",
+    "webhook_url": "",
+}
+
+_dispatch_config_file = os.path.join(os.path.dirname(__file__), "..", "..", "..", "dispatch_config.json")
+
+
+def _load_dispatch_config() -> dict:
+    try:
+        if os.path.exists(_dispatch_config_file):
+            with open(_dispatch_config_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                _DISPATCH_CONFIG.update(data)
+    except Exception:
+        pass
+    return dict(_DISPATCH_CONFIG)
+
+
+def _save_dispatch_config(data: dict):
+    try:
+        os.makedirs(os.path.dirname(_dispatch_config_file), exist_ok=True)
+        with open(_dispatch_config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+class DispatchConfigUpdate(BaseModel):
+    cron_schedule: str = ""
+    notification_email: str = ""
+    webhook_url: str = ""
+
+
+@router.get("/dispatch-config", response_model=ResponseModel)
+async def get_dispatch_config(
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    return success_response(data=_load_dispatch_config())
+
+
+@router.put("/dispatch-config", response_model=ResponseModel)
+async def update_dispatch_config(
+    body: DispatchConfigUpdate,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    data = body.model_dump()
+    _DISPATCH_CONFIG.update(data)
+    _save_dispatch_config(_DISPATCH_CONFIG)
+    return success_response(data=_DISPATCH_CONFIG)
 
 
 class RuntimeConfigUpdate(BaseModel):
@@ -280,7 +338,7 @@ async def test_ai_model(
 
     try:
         if config.model_type == "llm":
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"{base_url}/v1/chat/completions",
                     json={
@@ -290,21 +348,94 @@ async def test_ai_model(
                     },
                     headers=headers | {"Content-Type": "application/json"},
                 )
-                resp.raise_for_status()
-            return success_response(data={"status": "ok"})
+
+                if resp.status_code == 401 or resp.status_code == 403:
+                    raise HTTPException(
+                        status_code=401,
+                        detail=f"认证失败：API Key 无效或已过期（HTTP {resp.status_code}）",
+                    )
+                if resp.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"模型 '{config.model_name}' 不存在，请检查模型名",
+                    )
+                if resp.status_code == 429:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="请求频率过高，请稍后重试",
+                    )
+                if resp.status_code >= 400:
+                    try:
+                        error_body = resp.json()
+                        error_msg = error_body.get("error", {}).get("message", str(error_body))
+                    except Exception:
+                        error_msg = resp.text[:200]
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"模型服务返回错误 ({resp.status_code}): {error_msg}",
+                    )
+
+                data = resp.json()
+                if not data.get("choices"):
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"模型 '{config.model_name}' 未返回任何推理结果，可能该模型不可用或不存在",
+                    )
+                first_choice = data["choices"][0]
+                if not first_choice.get("message"):
+                    raise HTTPException(
+                        status_code=502,
+                        detail="推理响应格式异常：缺少 message 字段",
+                    )
+
+            return success_response(data={"status": "ok", "message": data["choices"][0]["message"].get("content", "")[:50]})
 
         elif config.model_type == "embedding":
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"{base_url}/v1/embeddings",
                     json={"input": ["test"], "model": config.model_name},
-                    headers=headers,
+                    headers=headers | {"Content-Type": "application/json"},
                 )
-                resp.raise_for_status()
-            return success_response(data={"status": "ok"})
+
+                if resp.status_code == 401 or resp.status_code == 403:
+                    raise HTTPException(
+                        status_code=401,
+                        detail=f"认证失败：API Key 无效或已过期（HTTP {resp.status_code}）",
+                    )
+                if resp.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"模型 '{config.model_name}' 不存在，请检查模型名",
+                    )
+                if resp.status_code >= 400:
+                    try:
+                        error_body = resp.json()
+                        error_msg = error_body.get("error", {}).get("message", str(error_body))
+                    except Exception:
+                        error_msg = resp.text[:200]
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"模型服务返回错误 ({resp.status_code}): {error_msg}",
+                    )
+
+                data = resp.json()
+                if not data.get("data"):
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"模型 '{config.model_name}' 未返回 embedding 结果",
+                    )
+                embedding = data["data"][0].get("embedding", [])
+                if not embedding or len(embedding) == 0:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Embedding 响应格式异常：向量数据为空",
+                    )
+
+            return success_response(data={"status": "ok", "dimension": len(embedding)})
 
         elif config.model_type == "rerank":
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     f"{base_url}/v1/rerank",
                     json={
@@ -312,18 +443,62 @@ async def test_ai_model(
                         "query": "test query",
                         "documents": ["test document"],
                     },
-                    headers=headers,
+                    headers=headers | {"Content-Type": "application/json"},
                 )
-                resp.raise_for_status()
-            return success_response(data={"status": "ok"})
+
+                if resp.status_code == 401 or resp.status_code == 403:
+                    raise HTTPException(
+                        status_code=401,
+                        detail=f"认证失败：API Key 无效或已过期（HTTP {resp.status_code}）",
+                    )
+                if resp.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"模型 '{config.model_name}' 不存在，请检查模型名",
+                    )
+                if resp.status_code >= 400:
+                    try:
+                        error_body = resp.json()
+                        error_msg = error_body.get("error", {}).get("message", str(error_body))
+                    except Exception:
+                        error_msg = resp.text[:200]
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"模型服务返回错误 ({resp.status_code}): {error_msg}",
+                    )
+
+                data = resp.json()
+                results = data.get("results", data.get("data", []))
+                if not results:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"模型 '{config.model_name}' 未返回 rerank 结果",
+                    )
+
+            return success_response(data={"status": "ok", "result_count": len(results)})
 
         else:
             raise HTTPException(status_code=400, detail=f"Unknown model type: {config.model_type}")
 
     except HTTPException:
         raise
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法连接到服务 '{base_url}'，请检查服务地址和网络",
+        )
+    except httpx.ConnectTimeout:
+        raise HTTPException(
+            status_code=504,
+            detail=f"连接超时：服务 '{base_url}' 未在 30 秒内响应",
+        )
+    except httpx.ReadTimeout:
+        raise HTTPException(
+            status_code=504,
+            detail=f"读取超时：服务 '{base_url}' 响应过慢",
+        )
     except Exception as e:
-        return success_response(data={
-            "status": "unavailable",
-            "error": str(e)[:500],
-        })
+        raise HTTPException(
+            status_code=500,
+            detail=f"测试连接时发生未知错误: {str(e)[:300]}",
+        )

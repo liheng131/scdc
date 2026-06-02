@@ -54,9 +54,13 @@ export const reportsApi = {
   },
 
   exportReportUrl: (id: number, fmt: string = 'docx'): string => {
-    const token = localStorage.getItem('token') || '';
     const base = import.meta.env.VITE_API_BASE_URL || '';
-    return `${base}/api/v1/reports/${id}/export?fmt=${fmt}&token=${token}`;
+    return `${base}/api/v1/reports/${id}/export?fmt=${fmt}`;
+  },
+
+  getExportHeaders: (): Record<string, string> => {
+    const token = localStorage.getItem('token') || '';
+    return { 'Authorization': `Bearer ${token}` };
   },
 
   getStatistics: async (params: { period: 'day' | 'week' | 'month' | 'year'; report_type?: string; status?: string; limit?: number }): Promise<ApiResponse<ReportStatisticsResponse>> => {

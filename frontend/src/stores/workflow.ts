@@ -2,6 +2,14 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { workflowApi } from '../api';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
+const sanitizeHtml = (html: string): string => {
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'strong', 'em', 'u', 's', 'a', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'code', 'pre', 'hr', 'img', 'sup', 'sub'],
+    ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'title', 'class'],
+  });
+};
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -144,10 +152,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     setActiveConversation(null);
   };
 
+  const isStreamFinished = ref(false);
+
   const setupStreamListeners = (convId: string, assistantIdx: number, callbacks: StreamCallbacks) => {
     activeConvIdForStream.value = convId;
     activeAssistantIdxForStream.value = assistantIdx;
     streamCallbacks.value = callbacks;
+    isStreamFinished.value = false;
   };
 
   const attachEventSourceListeners = (es: EventSource) => {
@@ -170,7 +181,64 @@ export const useWorkflowStore = defineStore('workflow', () => {
       }
     });
 
+    es.addEventListener('direct_response', (e: any) => {
+      const data = JSON.parse(e.data);
+      if (activeConvIdForStream.value && activeAssistantIdxForStream.value >= 0) {
+        const conv = conversations.value.find(c => c.id === activeConvIdForStream.value);
+        if (conv && conv.messages[activeAssistantIdxForStream.value]) {
+          const currentContent = conv.messages[activeAssistantIdxForStream.value].content || '';
+          updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
+            content: currentContent + (data.content || ''),
+            stageHint: '💬 正在回复...',
+          });
+        }
+      }
+    });
+
+    es.addEventListener('direct_response_done', (e: any) => {
+      isStreamFinished.value = true;
+      const data = JSON.parse(e.data);
+
+      if (activeConvIdForStream.value && activeAssistantIdxForStream.value >= 0) {
+        const conv = conversations.value.find(c => c.id === activeConvIdForStream.value);
+        const assistantMsg = conv && conv.messages[activeAssistantIdxForStream.value];
+        const md = assistantMsg?.content || '';
+        let renderedContent = '';
+        if (md) {
+          try {
+            renderedContent = sanitizeHtml(marked.parse(md) as string);
+          } catch {
+            renderedContent = md.replace(/\n/g, '<br>');
+          }
+        }
+        updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
+          content: renderedContent,
+          reportMarkdown: md,
+          stageHint: '',
+          chartOptions: data.chart_configs || [],
+        });
+        if (activeConvIdForStream.value) {
+          updateConversationStatus(activeConvIdForStream.value, 'completed');
+        }
+      }
+
+      if (streamCallbacks.value.onCompleted) {
+        streamCallbacks.value.onCompleted({
+          workflow_id: data.workflow_id || null,
+          report_markdown: null,
+          chart_configs: data.chart_configs || [],
+          sections: [],
+          collected_count: 0,
+          cleaned_count: 0,
+          insight_count: 0,
+        });
+      }
+
+      clearEventSource();
+    });
+
     es.addEventListener('stage_error', (e: any) => {
+      isStreamFinished.value = true;
       const data = JSON.parse(e.data);
       if (streamCallbacks.value.onStageError) {
         streamCallbacks.value.onStageError(data);
@@ -188,6 +256,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     });
 
     es.addEventListener('completed', (e: any) => {
+      isStreamFinished.value = true;
       const data = JSON.parse(e.data);
       if (streamCallbacks.value.onCompleted) {
         streamCallbacks.value.onCompleted(data);
@@ -197,7 +266,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
         let content = '';
         if (md) {
           try {
-            content = marked.parse(md) as string;
+            content = sanitizeHtml(marked.parse(md) as string);
           } catch {
             content = md.replace(/\n/g, '<br>');
           }
@@ -231,6 +300,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     });
 
     es.addEventListener('error', (e: any) => {
+      isStreamFinished.value = true;
       let parsedData: any = null;
       try {
         parsedData = JSON.parse(e.data);
@@ -267,7 +337,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     });
 
     es.onerror = () => {
-      if (runningWorkflowId.value) {
+      if (runningWorkflowId.value && !isStreamFinished.value) {
         if (streamCallbacks.value.onError) {
           streamCallbacks.value.onError({ error: 'SSE 连接已断开' });
         }
@@ -309,7 +379,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
             const md = item.result.report_markdown;
             let content = md;
             try {
-              content = marked.parse(md) as string;
+              content = sanitizeHtml(marked.parse(md) as string);
             } catch {
               content = md.replace(/\n/g, '<br>');
             }

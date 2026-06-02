@@ -5,7 +5,6 @@ from app.models.user import User
 from app.models.task import Task, TaskRun
 from app.models.report import Report
 from app.models.data_source import DataSource
-from app.models.template import Template
 from app.models.event_rule import EventRule
 from app.models.notification import NotificationRule
 from app.models.collected_record import CollectedRecord

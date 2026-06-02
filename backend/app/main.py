@@ -26,7 +26,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.services.scheduler import SchedulerService
 from app.services.vectorstore import VectorStoreService
 from app.services.embedding import EmbeddingService
-from app.core.db import async_session_factory, migrate_task_id_column, engine
+from app.core.db import async_session_factory, migrate_task_id_column, drop_templates_table, engine
 from app.models.base import Base
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Running database migrations...")
     await migrate_task_id_column()
+    await drop_templates_table()
     logger.info("Initializing AI model configs table...")
     try:
         from sqlalchemy import text

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { DataLine, Document, RefreshRight } from '@element-plus/icons-vue';
 import * as echarts from 'echarts';
 import { tasksApi, reportsApi, dataSourcesApi, type ReportStatisticsItem, metricsApi, type MetricsData } from '../api';
@@ -23,6 +23,10 @@ const metricsData = ref<MetricsData | null>(null);
 const metricsHistory = ref<Array<{ time: string; rps: number; latency: number }>>([]);
 let metricsTimer: ReturnType<typeof setInterval> | null = null;
 const trendChartRef = ref<HTMLElement | null>(null);
+
+// ECharts instances for lifecycle management
+let statisticsChart: echarts.ECharts | null = null;
+let trendChart: echarts.ECharts | null = null;
 
 const fetchSummaryData = async () => {
   loading.value = true;
@@ -58,7 +62,9 @@ const fetchStatistics = async () => {
 
 const initStatisticsChart = () => {
   if (!chartRef.value) return;
-  const myChart = echarts.init(chartRef.value);
+  if (statisticsChart) statisticsChart.dispose();
+
+  statisticsChart = echarts.init(chartRef.value);
 
   const option = {
     title: {
@@ -105,7 +111,8 @@ const initStatisticsChart = () => {
     ],
   };
 
-  myChart.setOption(option);
+  statisticsChart.setOption(option);
+  window.addEventListener('resize', () => statisticsChart?.resize());
 };
 
 const fetchMetrics = async () => {
@@ -130,7 +137,9 @@ const fetchMetrics = async () => {
 
 const initTrendChart = () => {
   if (!trendChartRef.value || metricsHistory.value.length < 2) return;
-  const myChart = echarts.init(trendChartRef.value);
+  if (trendChart) trendChart.dispose();
+
+  trendChart = echarts.init(trendChartRef.value);
   const option = {
     title: {
       text: '系统性能趋势',
@@ -174,7 +183,8 @@ const initTrendChart = () => {
       },
     ],
   };
-  myChart.setOption(option);
+  trendChart.setOption(option);
+  window.addEventListener('resize', () => trendChart?.resize());
 };
 
 const handlePeriodChange = (period: 'day' | 'week' | 'month' | 'year') => {
@@ -193,6 +203,14 @@ onUnmounted(() => {
   if (metricsTimer) {
     clearInterval(metricsTimer);
     metricsTimer = null;
+  }
+  if (statisticsChart) {
+    statisticsChart.dispose();
+    statisticsChart = null;
+  }
+  if (trendChart) {
+    trendChart.dispose();
+    trendChart = null;
   }
 });
 </script>

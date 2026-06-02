@@ -23,7 +23,6 @@ import {
   House,
   DataLine,
   Document,
-  Collection,
   Setting,
   SwitchButton,
   Fold,
@@ -67,10 +66,6 @@ const handleLogout = () => {
         <el-menu-item index="/workflow">
           <el-icon><DataLine /></el-icon>
           <template #title>智能体工作流 Workflow</template>
-        </el-menu-item>
-        <el-menu-item index="/templates">
-          <el-icon><Collection /></el-icon>
-          <template #title>大纲模板 Templates</template>
         </el-menu-item>
         <el-menu-item index="/reports">
           <el-icon><Document /></el-icon>
@@ -201,7 +196,7 @@ const handleLogout = () => {
 .main-content {
   padding: 24px;
   overflow-y: auto;
-  height: calc(100vh - 60px);
+  height: 100%;
 }
 
 .fade-transform-enter-active,

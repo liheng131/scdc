@@ -33,11 +33,46 @@ class FollowUpRequest(BaseModel):
     )
 
 
-@router.post("/start", response_model=ResponseModel)
+class ReentryRequest(BaseModel):
+    target_stage: str = Field(..., description="目标阶段: collecting, analyzing, reporting")
+    user_feedback: str = Field(default="", description="用户补充反馈/约束")
+
+
+@router.post("/start")
 async def start_workflow(
     req: WorkflowStartRequest,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
+    intent_result = await workflow_service._classify_intent(req.topic)
+    intent_type = intent_result.get("intent_type", "market_insight")
+
+    if intent_type == "general_question":
+        state = await workflow_service.create_workflow(
+            topic=req.topic,
+            max_items=0,
+            dimensions=[],
+        )
+        state.is_direct_response = True
+        return success_response(data={
+            "workflow_id": state.workflow_id,
+            "topic": state.topic,
+            "is_direct_response": True,
+        })
+
+    if intent_type == "workflow_reentry":
+        state = await workflow_service.create_workflow(
+            topic=req.topic,
+            max_items=req.max_items,
+            dimensions=req.dimensions,
+        )
+        return success_response(data={
+            "workflow_id": state.workflow_id,
+            "topic": state.topic,
+            "intent_type": intent_type,
+            "target_stage": intent_result.get("target_stage"),
+            "user_feedback": intent_result.get("user_feedback", ""),
+        })
+
     state = await workflow_service.create_workflow(
         topic=req.topic,
         max_items=req.max_items,
@@ -112,6 +147,35 @@ async def get_workflow_status(
         "result": state.result,
         "error": state.error,
     })
+
+
+@router.post("/{workflow_id}/reentry")
+async def reentry_workflow(
+    workflow_id: str,
+    req: ReentryRequest,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    original_state = await workflow_service.get_workflow(workflow_id)
+    if not original_state:
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+
+    topic = original_state.topic
+    return StreamingResponse(
+        workflow_service.run_reentry_stream(
+            original_workflow_id=workflow_id,
+            target_stage=req.target_stage,
+            user_feedback=req.user_feedback,
+            topic=topic,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/history/list", response_model=ResponseModel)

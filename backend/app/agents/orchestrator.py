@@ -14,7 +14,7 @@ OrchestratorAgent（主控 Agent）
 import datetime
 import logging
 from typing import Optional, Callable, Awaitable
-from app.schemas.agent import OrchestratorInput, OrchestratorOutput, CollectorInput, CleanerInput, AnalyzerInput, ReporterInput
+from app.schemas.agent import OrchestratorInput, OrchestratorOutput, CollectorInput, CleanerInput, AnalyzerInput, ReporterInput, CleanedItem, Insight, CleanerOutput, AnalyzerOutput
 from app.agents.collector import CollectorAgent
 from app.agents.cleaner import CleanerAgent
 from app.agents.analyzer import AnalyzerAgent
@@ -49,56 +49,168 @@ class OrchestratorAgent:
         ① collecting → ② cleaning → ③ analyzing → ④ reporting
 
         每个阶段成功后传递数据到下一阶段，失败则立即终止并返回错误。
+
+        支持 start_stage / reentry_context / previous_output 从中间阶段重入流水线。
         """
         task_id = input_data.task_id
         topic = input_data.topic
         started_at = datetime.datetime.utcnow()
 
+        start_stage = input_data.start_stage or "collecting"
+        reentry_context = input_data.reentry_context
+        previous_output = input_data.previous_output
+
         await self._update_status(task_id, "queued")
 
+        collected_count = 0
+
         try:
-            # 1. Collecting Stage - 搜索 + 爬取数据源
-            await self._update_status(task_id, "collecting")
-            col_in = CollectorInput(task_id=task_id, topic=topic, max_items=input_data.max_items)
-            col_out = await self.collector.execute(col_in)
-            if not col_out.success:
-                raise RuntimeError(f"Collector failed: {col_out.error}")
+            if start_stage == "collecting":
+                # 1. Collecting Stage - 搜索 + 爬取数据源
+                await self._update_status(task_id, "collecting")
+                effective_topic = f"{topic} (搜索约束: {reentry_context})" if reentry_context else topic
+                col_in = CollectorInput(task_id=task_id, topic=effective_topic, max_items=input_data.max_items)
+                col_out = await self.collector.execute(col_in)
+                if not col_out.success:
+                    raise RuntimeError(f"Collector failed: {col_out.error}")
 
-            # 2. Cleaning Stage - 去重、过滤低质内容、分块
-            await self._update_status(task_id, "cleaning")
-            cln_in = CleanerInput(task_id=task_id, raw_items=col_out.items)
-            self.cleaner.min_content_length = input_data.min_content_length
-            cln_out = await self.cleaner.execute(cln_in)
-            if not cln_out.success:
-                raise RuntimeError(f"Cleaner failed: {cln_out.error}")
+                # 2. Cleaning Stage - 去重、过滤低质内容、分块
+                await self._update_status(task_id, "cleaning")
+                cln_in = CleanerInput(task_id=task_id, raw_items=col_out.items)
+                self.cleaner.min_content_length = input_data.min_content_length
+                cln_out = await self.cleaner.execute(cln_in)
+                if not cln_out.success:
+                    raise RuntimeError(f"Cleaner failed: {cln_out.error}")
 
-            # 3. Analyzing Stage - LLM 深度分析提取洞察
-            await self._update_status(task_id, "analyzing")
-            ana_in = AnalyzerInput(task_id=task_id, topic=topic, cleaned_items=cln_out.cleaned_items, dimensions=input_data.dimensions)
-            ana_out = await self.analyzer.execute(ana_in)
-            if not ana_out.success:
-                raise RuntimeError(f"Analyzer failed: {ana_out.error}")
+                collected_count = len(col_out.items)
 
-            # 4. Reporting Stage - 生成结构化 Markdown 报告
-            await self._update_status(task_id, "reporting")
-            import re
-            source_contents = []
-            for ci in cln_out.cleaned_items:
-                full_text = "\n".join(ci.content_chunks) if ci.content_chunks else ci.summary
-                source_contents.append({
-                    "uri": ci.source_uri,
-                    "title": ci.title,
-                    "content": full_text[:1000],
-                })
-            rep_in = ReporterInput(
-                task_id=task_id, topic=topic, analyzer_output=ana_out,
-                include_charts=input_data.include_charts,
-                dimensions=input_data.dimensions,
-                source_contents=source_contents,
-            )
-            rep_out = await self.reporter.execute(rep_in)
-            if not rep_out.success:
-                raise RuntimeError(f"Reporter failed: {rep_out.error}")
+                # 3. Analyzing Stage - LLM 深度分析提取洞察
+                await self._update_status(task_id, "analyzing")
+                ana_in = AnalyzerInput(task_id=task_id, topic=topic, cleaned_items=cln_out.cleaned_items, dimensions=input_data.dimensions)
+                ana_out = await self.analyzer.execute(ana_in)
+                if not ana_out.success:
+                    raise RuntimeError(f"Analyzer failed: {ana_out.error}")
+
+                # 4. Reporting Stage - 生成结构化 Markdown 报告
+                await self._update_status(task_id, "reporting")
+                import re
+                source_contents = []
+                for ci in cln_out.cleaned_items:
+                    full_text = "\n".join(ci.content_chunks) if ci.content_chunks else ci.summary
+                    source_contents.append({
+                        "uri": ci.source_uri,
+                        "title": ci.title,
+                        "content": full_text[:1000],
+                    })
+                rep_in = ReporterInput(
+                    task_id=task_id, topic=topic, analyzer_output=ana_out,
+                    include_charts=input_data.include_charts,
+                    dimensions=input_data.dimensions,
+                    source_contents=source_contents,
+                )
+                rep_out = await self.reporter.execute(rep_in)
+                if not rep_out.success:
+                    raise RuntimeError(f"Reporter failed: {rep_out.error}")
+
+            elif start_stage == "analyzing":
+                cleaned_data = (previous_output or {}).get("cleaned", {})
+                cleaned_items_raw = cleaned_data.get("items", [])
+                reconstructed_items = [
+                    CleanedItem(
+                        source_type=item.get("source_type", ""),
+                        source_uri=item.get("source_uri", ""),
+                        title=item.get("title", ""),
+                        summary=item.get("summary", ""),
+                        content_chunks=item.get("content_chunks", []),
+                        relevance_score=item.get("relevance_score", 1.0),
+                    )
+                    for item in cleaned_items_raw
+                ]
+                cln_out = CleanerOutput(task_id=task_id, success=True, cleaned_items=reconstructed_items)
+                collected_count = len(reconstructed_items)
+
+                await self._update_status(task_id, "analyzing")
+                analysis_topic = f"{topic}\n\n额外约束/反馈: {reentry_context}" if reentry_context else topic
+                ana_in = AnalyzerInput(task_id=task_id, topic=analysis_topic, cleaned_items=cln_out.cleaned_items, dimensions=input_data.dimensions)
+                ana_out = await self.analyzer.execute(ana_in)
+                if not ana_out.success:
+                    raise RuntimeError(f"Analyzer failed: {ana_out.error}")
+
+                await self._update_status(task_id, "reporting")
+                import re
+                source_contents = []
+                for ci in cln_out.cleaned_items:
+                    full_text = "\n".join(ci.content_chunks) if ci.content_chunks else ci.summary
+                    source_contents.append({
+                        "uri": ci.source_uri,
+                        "title": ci.title,
+                        "content": full_text[:1000],
+                    })
+                rep_in = ReporterInput(
+                    task_id=task_id, topic=topic, analyzer_output=ana_out,
+                    include_charts=input_data.include_charts,
+                    dimensions=input_data.dimensions,
+                    source_contents=source_contents,
+                )
+                rep_out = await self.reporter.execute(rep_in)
+                if not rep_out.success:
+                    raise RuntimeError(f"Reporter failed: {rep_out.error}")
+
+            elif start_stage == "reporting":
+                cleaned_data = (previous_output or {}).get("cleaned", {})
+                cleaned_items_raw = cleaned_data.get("items", [])
+                reconstructed_items = [
+                    CleanedItem(
+                        source_type=item.get("source_type", ""),
+                        source_uri=item.get("source_uri", ""),
+                        title=item.get("title", ""),
+                        summary=item.get("summary", ""),
+                        content_chunks=item.get("content_chunks", []),
+                        relevance_score=item.get("relevance_score", 1.0),
+                    )
+                    for item in cleaned_items_raw
+                ]
+                cln_out = CleanerOutput(task_id=task_id, success=True, cleaned_items=reconstructed_items)
+                collected_count = len(reconstructed_items)
+
+                analyzed_data = (previous_output or {}).get("analyzed", {})
+                insights_raw = analyzed_data.get("insights", [])
+                reconstructed_insights = [
+                    Insight(
+                        dimension=ins.get("dimension", ""),
+                        analysis=ins.get("content", ""),
+                        confidence=ins.get("confidence", 0.8),
+                        evidence=ins.get("evidence", []),
+                    )
+                    for ins in insights_raw
+                ]
+                ana_out = AnalyzerOutput(
+                    task_id=task_id,
+                    success=True,
+                    summary=analyzed_data.get("summary", ""),
+                    insights=reconstructed_insights,
+                )
+
+                await self._update_status(task_id, "reporting")
+                import re
+                source_contents = []
+                for ci in cln_out.cleaned_items:
+                    full_text = "\n".join(ci.content_chunks) if ci.content_chunks else ci.summary
+                    source_contents.append({
+                        "uri": ci.source_uri,
+                        "title": ci.title,
+                        "content": full_text[:1000],
+                    })
+                rep_topic = f"{topic}\n\n报告生成额外要求: {reentry_context}" if reentry_context else topic
+                rep_in = ReporterInput(
+                    task_id=task_id, topic=rep_topic, analyzer_output=ana_out,
+                    include_charts=input_data.include_charts,
+                    dimensions=input_data.dimensions,
+                    source_contents=source_contents,
+                )
+                rep_out = await self.reporter.execute(rep_in)
+                if not rep_out.success:
+                    raise RuntimeError(f"Reporter failed: {rep_out.error}")
 
             # 5. Completed - 所有阶段成功完成
             await self._update_status(task_id, "completed")
@@ -110,7 +222,7 @@ class OrchestratorAgent:
                 status="completed",
                 started_at=started_at,
                 ended_at=ended_at,
-                collected_count=len(col_out.items),
+                collected_count=collected_count,
                 cleaned_count=len(cln_out.cleaned_items),
                 analyzer_output=ana_out,
                 reporter_output=rep_out,

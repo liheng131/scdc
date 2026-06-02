@@ -46,27 +46,28 @@ class EmbeddingService:
 
     async def _embed_ollama(self, texts: List[str]) -> List[List[float]]:
         embeddings: List[List[float]] = []
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            for text in texts:
-                try:
-                    url = f"{self.base_url}/api/embeddings"
-                    payload = {"model": self.model, "prompt": text}
-                    resp = await client.post(url, json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    embedding = data.get("embedding", [])
-                    if not embedding:
-                        raise ValueError(f"Ollama returned empty embedding for text: {text[:50]}...")
-                    embeddings.append(embedding)
-                except httpx.HTTPStatusError as e:
-                    logger.error(f"Ollama embedding HTTP error: {e.response.status_code} - {e.response.text}")
-                    raise
-                except httpx.RequestError as e:
-                    logger.error(f"Ollama embedding request error: {str(e)}")
-                    raise
-                except Exception as e:
-                    logger.error(f"Ollama embedding unexpected error: {str(e)}")
-                    raise
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+                for text in texts:
+                    try:
+                        url = f"{self.base_url}/api/embeddings"
+                        payload = {"model": self.model, "prompt": text}
+                        resp = await client.post(url, json=payload)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        embedding = data.get("embedding", [])
+                        if not embedding:
+                            logger.warning(f"Ollama returned empty embedding for text: {text[:50]}...")
+                            continue
+                        embeddings.append(embedding)
+                    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                        logger.warning(f"Ollama embedding unavailable: {str(e)[:200]}")
+                        return embeddings if embeddings else []
+                    except Exception as e:
+                        logger.warning(f"Ollama embedding error for text: {str(e)[:200]}")
+                        continue
+        except Exception as e:
+            logger.warning(f"Ollama embedding service unreachable: {str(e)[:200]}")
         return embeddings
 
     async def _embed_gpustack(self, texts: List[str]) -> List[List[float]]:

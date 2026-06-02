@@ -18,6 +18,9 @@ export interface FollowUpRequest {
 export interface WorkflowStartResponse {
   workflow_id: string;
   topic: string;
+  intent_type?: string;
+  target_stage?: string;
+  user_feedback?: string;
 }
 
 export interface FollowUpResponse {
@@ -63,5 +66,18 @@ export const workflowApi = {
   getHistory: async (): Promise<ApiResponse<any[]>> => {
     const res = await apiClient.get('/api/v1/workflow/history/list');
     return res.data;
+  },
+
+  reentryStream: async (workflowId: string, target_stage: string, user_feedback: string): Promise<Response> => {
+    const token = localStorage.getItem('token') || '';
+    const url = `/api/v1/workflow/${workflowId}/reentry?token=${encodeURIComponent(token)}`;
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ target_stage, user_feedback }),
+    });
   },
 };

@@ -89,3 +89,15 @@ async def migrate_task_id_column() -> None:
                 logger.info("reports.task_id column not found, skipping migration")
     except Exception:
         logger.exception("Failed to migrate reports.task_id column, continuing...")
+
+async def drop_templates_table() -> None:
+    """Drop the unused templates table if it exists."""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS templates"))
+            logger.info("Dropped templates table (deprecated feature)")
+    except Exception:
+        logger.exception("Failed to drop templates table, continuing...")

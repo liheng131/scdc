@@ -1,0 +1,130 @@
+/* Global CSS Variables and Reset */
+
+:root {
+  /* Primary Colors */
+  --scdc-primary: #409eff;
+  --scdc-primary-light: #66b1ff;
+  --scdc-primary-dark: #337ecc;
+
+  /* Success / Warning / Error */
+  --scdc-success: #67c23a;
+  --scdc-warning: #e6a23c;
+  --scdc-danger: #f56c6c;
+
+  /* Sidebar */
+  --scdc-sidebar-bg: #1e222d;
+  --scdc-sidebar-bg-dark: #161922;
+  --scdc-sidebar-text: #a0aec0;
+  --scdc-sidebar-active-text: #ffffff;
+  --scdc-sidebar-active-bg: #2b3040;
+  --scdc-sidebar-active-border: var(--scdc-primary);
+
+  /* Backgrounds */
+  --scdc-bg-page: #f5f7fa;
+  --scdc-bg-white: #ffffff;
+  --scdc-bg-light: #f7f8fa;
+  --scdc-bg-hover: #f0f4ff;
+
+  /* Text Colors */
+  --scdc-text-primary: #2d3748;
+  --scdc-text-secondary: #4a5568;
+  --scdc-text-muted: #718096;
+  --scdc-text-placeholder: #a0aec0;
+
+  /* Borders */
+  --scdc-border-color: #e2e8f0;
+  --scdc-border-light: #edf2f7;
+
+  /* Gradients */
+  --scdc-gradient-banner: linear-gradient(135deg, #2b3040 0%, #161922 100%);
+  --scdc-gradient-logo: linear-gradient(135deg, var(--scdc-primary), var(--scdc-success));
+  --scdc-gradient-stat-bar: linear-gradient(0, 0, 0, 1,
+    from var(--scdc-primary),
+    to var(--scdc-success)
+  );
+
+  /* Shadows */
+  --scdc-shadow-card: 0 4px 20px rgba(0, 0, 0, 0.05);
+  --scdc-shadow-header: 0 1px 4px rgba(0, 21, 41, 0.08);
+  --scdc-shadow-banner: 0 10px 30px rgba(0, 0, 0, 0.15);
+  --scdc-shadow-float: -2px 0 8px rgba(0, 0, 0, 0.05);
+
+  /* Border Radius */
+  --scdc-radius-sm: 4px;
+  --scdc-radius-md: 8px;
+  --scdc-radius-lg: 12px;
+  --scdc-radius-xl: 16px;
+  --scdc-radius-pill: 20px;
+
+  /* Spacing */
+  --scdc-spacing-xs: 4px;
+  --scdc-spacing-sm: 8px;
+  --scdc-spacing-md: 12px;
+  --scdc-spacing-lg: 16px;
+  --scdc-spacing-xl: 20px;
+  --scdc-spacing-2xl: 24px;
+  --scdc-spacing-3xl: 32px;
+  --scdc-spacing-4xl: 40px;
+
+  /* Transitions */
+  --scdc-transition-fast: 0.2s ease;
+  --scdc-transition-normal: 0.3s ease;
+  --scdc-transition-slow: 0.5s ease;
+
+  /* Fonts */
+  --scdc-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* CSS Reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--scdc-font-family);
+  color: var(--scdc-text-primary);
+  background-color: var(--scdc-bg-page);
+  line-height: 1.5;
+}
+
+/* Element Plus overrides using CSS variables */
+:root {
+  --el-color-primary: var(--scdc-primary);
+  --el-color-primary-light-3: var(--scdc-primary-light);
+  --el-color-primary-dark-2: var(--scdc-primary-dark);
+  --el-color-success: var(--scdc-success);
+  --el-color-warning: var(--scdc-warning);
+  --el-color-danger: var(--scdc-danger);
+  --el-border-radius-base: var(--scdc-radius-md);
+  --el-border-radius-small: var(--scdc-radius-sm);
+}
+
+/* Responsive breakpoints */
+@media (max-width: 1024px) {
+  html {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: 768px) {
+  html {
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 480px) {
+  html {
+    font-size: 12px;
+  }
+}

@@ -47,8 +47,23 @@ export interface AiModelUpdate {
 
 export interface AiModelTestResult {
   status: string;
+  message?: string;
+  dimension?: number;
+  result_count?: number;
   models?: string[];
   error?: string;
+}
+
+export interface DispatchConfig {
+  cron_schedule: string;
+  notification_email: string;
+  webhook_url: string;
+}
+
+export interface DispatchConfigUpdate {
+  cron_schedule?: string;
+  notification_email?: string;
+  webhook_url?: string;
 }
 
 export const settingsApi = {
@@ -94,6 +109,16 @@ export const settingsApi = {
 
   testAiModel: async (id: number): Promise<ApiResponse<AiModelTestResult>> => {
     const res = await apiClient.post(`/api/v1/settings/ai-models/${id}/test`);
+    return res.data;
+  },
+
+  getDispatchConfig: async (): Promise<ApiResponse<DispatchConfig>> => {
+    const res = await apiClient.get('/api/v1/settings/dispatch-config');
+    return res.data;
+  },
+
+  saveDispatchConfig: async (data: DispatchConfigUpdate): Promise<ApiResponse<DispatchConfig>> => {
+    const res = await apiClient.put('/api/v1/settings/dispatch-config', data);
     return res.data;
   },
 };
