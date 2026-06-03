@@ -99,6 +99,9 @@ class DirectResponseService:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
                 if role in ("user", "assistant"):
+                    # 截断过长的历史消息内容，避免超出 LLM token 限制
+                    if len(content) > 2000:
+                        content = content[:2000] + "...(内容已截断)"
                     messages.append({"role": role, "content": content})
 
         messages.append({"role": "user", "content": message})
