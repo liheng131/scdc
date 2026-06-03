@@ -65,6 +65,38 @@ class WorkflowService:
         async for chunk in self._direct_response.generate_response_stream(message, conversation_history):
             yield chunk
 
+    async def run_follow_up_stream(self, state: WorkflowState, message: str, conversation_history: list = None) -> AsyncGenerator[str, None]:
+        """处理追问请求，在当前对话上下文中生成回复"""
+        state.is_direct_response = True
+        state.topic = message
+        state.status = "running"
+        state.current_stage = "follow_up"
+        await self._persist_stage_update(state)
+
+        yield self._sse("stage_start", {
+            "stage": "follow_up",
+            "label": "回复追问",
+            "icon": "💬",
+            "index": 0,
+            "total": 1,
+        })
+
+        async for chunk in self._direct_response.generate_response_stream(
+            message=message,
+            conversation_history=conversation_history,
+            workflow_id=state.workflow_id,
+        ):
+            yield chunk
+
+        state.status = "completed"
+        state.current_stage = ""
+        await self._persist_stage_update(state)
+
+        yield self._sse("stage_complete", {
+            "stage": "follow_up",
+            "label": "回复追问",
+        })
+
     async def create_workflow(self, topic: str, max_items: int, dimensions: list = None) -> WorkflowState:
         wf_id = str(uuid.uuid4())[:8]
         if dimensions is None:
