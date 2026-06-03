@@ -87,26 +87,19 @@ async def start_workflow(
 @router.post("/follow-up")
 async def follow_up_workflow(
     req: FollowUpRequest,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
     state = await workflow_service.create_workflow(
         topic=req.message,
         max_items=0,
         dimensions=[],
+        conversation_history=req.conversation_history,
     )
-    return StreamingResponse(
-        workflow_service.run_follow_up_stream(
-            state=state,
-            message=req.message,
-            conversation_history=req.conversation_history,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    state.is_direct_response = True
+    return success_response(data={
+        "workflow_id": state.workflow_id,
+        "topic": state.topic,
+    })
 
 
 @router.get("/{workflow_id}/stream")
