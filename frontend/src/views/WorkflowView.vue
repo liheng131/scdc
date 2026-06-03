@@ -73,12 +73,25 @@ const scrollToBottom = () => {
   });
 };
 
+const isFollowUpMode = computed(() => {
+  const activeConv = workflowStore.activeConversation;
+  return activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
+});
+
+const inputPlaceholder = computed(() => {
+  return isFollowUpMode.value ? '输入追问...' : '输入你想分析的市场主题...';
+});
+
+const buttonText = computed(() => {
+  return isFollowUpMode.value ? '发送' : '开始分析';
+});
+
 const quickAsk = (topic: string) => {
   inputTopic.value = topic;
-  startAnalysis();
+  sendMessage();
 };
 
-const startAnalysis = () => {
+const sendMessage = () => {
   const topic = inputTopic.value.trim();
   if (!topic || loading.value) return;
 
@@ -90,94 +103,186 @@ const startAnalysis = () => {
   }
   showSlowHint.value = false;
 
-  const conv = workflowStore.createConversation(topic);
+  const activeConv = workflowStore.activeConversation;
+  const isFollowUp = activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
 
-  conv.messages.push({ role: 'user', content: topic });
-  conv.messages.push({
-    role: 'assistant',
-    content: '',
-    reportMarkdown: '',
-    chartOptions: [],
-  });
-
-  inputTopic.value = '';
-  loading.value = true;
-  scrollToBottom();
-
-  const assistantIdx = 1;
-
-  workflowApi.start({ topic, max_items: 5 })
-    .then((res) => {
-      workflowStore.startWorkflowStream(conv.id, assistantIdx, res.data.workflow_id, {
-        onStageStart: (data) => {
-          showSlowHint.value = false;
-          if (slowHintTimer) clearTimeout(slowHintTimer);
-          slowHintTimer = setTimeout(() => {
-            showSlowHint.value = true;
-          }, 60000);
-          currentStageHint.value = { icon: data.icon, label: data.label };
-          scrollToBottom();
-        },
-        onStageComplete: (_data) => {
-          showSlowHint.value = false;
-          if (slowHintTimer) clearTimeout(slowHintTimer);
-          slowHintTimer = setTimeout(() => {
-            showSlowHint.value = true;
-          }, 60000);
-        },
-        onStageError: (data) => {
-          if (slowHintTimer) {
-            clearTimeout(slowHintTimer);
-            slowHintTimer = null;
-          }
-          showSlowHint.value = false;
-          loading.value = false;
-          currentStageHint.value = null;
-          ElMessage.error(`${data.label}失败`);
-        },
-        onCompleted: (data) => {
-          if (slowHintTimer) {
-            clearTimeout(slowHintTimer);
-            slowHintTimer = null;
-          }
-          showSlowHint.value = false;
-          currentWorkflowId.value = data.workflow_id || null;
-          loading.value = false;
-          currentStageHint.value = null;
-          scrollToBottom();
-          nextTick(() => {
-            const updatedConv = workflowStore.activeConversation;
-            if (updatedConv) renderChartsForMessages(updatedConv.messages);
-          });
-        },
-        onError: (data) => {
-          if (slowHintTimer) {
-            clearTimeout(slowHintTimer);
-            slowHintTimer = null;
-          }
-          showSlowHint.value = false;
-          loading.value = false;
-          currentStageHint.value = null;
-          ElMessage.error(`工作流异常: ${data.error}`);
-        },
-      });
-
-      showSlowHint.value = false;
-      if (slowHintTimer) clearTimeout(slowHintTimer);
-      slowHintTimer = setTimeout(() => {
-        showSlowHint.value = true;
-      }, 60000);
-    })
-    .catch(() => {
-      conv.messages.pop();
-      if (slowHintTimer) {
-        clearTimeout(slowHintTimer);
-        slowHintTimer = null;
-      }
-      showSlowHint.value = false;
-      ElMessage.error('启动分析失败，请检查后端服务');
-      loading.value = false;
+  if (isFollowUp) {
+    // 追问模式：在当前对话中追加消息
+    activeConv.messages.push({ role: 'user', content: topic });
+    activeConv.messages.push({
+      role: 'assistant',
+      content: '',
+      reportMarkdown: '',
+      chartOptions: [],
     });
+    const assistantIdx = activeConv.messages.length - 1;
+
+    // 构建对话历史
+    const conversationHistory = activeConv.messages
+      .slice(0, -2)
+      .map(m => ({ role: m.role, content: m.content || m.reportMarkdown || '' }));
+
+    inputTopic.value = '';
+    loading.value = true;
+    scrollToBottom();
+
+    workflowApi.followUp({ message: topic, conversation_history: conversationHistory })
+      .then((res) => {
+        workflowStore.startWorkflowStream(activeConv.id, assistantIdx, res.data.workflow_id, {
+          onStageStart: (data) => {
+            showSlowHint.value = false;
+            if (slowHintTimer) clearTimeout(slowHintTimer);
+            slowHintTimer = setTimeout(() => {
+              showSlowHint.value = true;
+            }, 60000);
+            currentStageHint.value = { icon: data.icon, label: data.label };
+            scrollToBottom();
+          },
+          onStageComplete: (_data) => {
+            showSlowHint.value = false;
+            if (slowHintTimer) clearTimeout(slowHintTimer);
+            slowHintTimer = setTimeout(() => {
+              showSlowHint.value = true;
+            }, 60000);
+          },
+          onStageError: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            loading.value = false;
+            currentStageHint.value = null;
+            ElMessage.error(`${data.label}失败`);
+          },
+          onCompleted: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            currentWorkflowId.value = data.workflow_id || null;
+            loading.value = false;
+            currentStageHint.value = null;
+            scrollToBottom();
+            nextTick(() => {
+              const updatedConv = workflowStore.activeConversation;
+              if (updatedConv) renderChartsForMessages(updatedConv.messages);
+            });
+          },
+          onError: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            loading.value = false;
+            currentStageHint.value = null;
+            ElMessage.error(`追问异常: ${data.error}`);
+          },
+        });
+      })
+      .catch(() => {
+        activeConv.messages.pop();
+        if (slowHintTimer) {
+          clearTimeout(slowHintTimer);
+          slowHintTimer = null;
+        }
+        showSlowHint.value = false;
+        ElMessage.error('追问失败，请重试');
+        loading.value = false;
+      });
+  } else {
+    // 首次分析模式：创建新对话
+    const conv = workflowStore.createConversation(topic);
+
+    conv.messages.push({ role: 'user', content: topic });
+    conv.messages.push({
+      role: 'assistant',
+      content: '',
+      reportMarkdown: '',
+      chartOptions: [],
+    });
+
+    inputTopic.value = '';
+    loading.value = true;
+    scrollToBottom();
+
+    const assistantIdx = 1;
+
+    workflowApi.start({ topic, max_items: 5 })
+      .then((res) => {
+        workflowStore.startWorkflowStream(conv.id, assistantIdx, res.data.workflow_id, {
+          onStageStart: (data) => {
+            showSlowHint.value = false;
+            if (slowHintTimer) clearTimeout(slowHintTimer);
+            slowHintTimer = setTimeout(() => {
+              showSlowHint.value = true;
+            }, 60000);
+            currentStageHint.value = { icon: data.icon, label: data.label };
+            scrollToBottom();
+          },
+          onStageComplete: (_data) => {
+            showSlowHint.value = false;
+            if (slowHintTimer) clearTimeout(slowHintTimer);
+            slowHintTimer = setTimeout(() => {
+              showSlowHint.value = true;
+            }, 60000);
+          },
+          onStageError: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            loading.value = false;
+            currentStageHint.value = null;
+            ElMessage.error(`${data.label}失败`);
+          },
+          onCompleted: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            currentWorkflowId.value = data.workflow_id || null;
+            loading.value = false;
+            currentStageHint.value = null;
+            scrollToBottom();
+            nextTick(() => {
+              const updatedConv = workflowStore.activeConversation;
+              if (updatedConv) renderChartsForMessages(updatedConv.messages);
+            });
+          },
+          onError: (data) => {
+            if (slowHintTimer) {
+              clearTimeout(slowHintTimer);
+              slowHintTimer = null;
+            }
+            showSlowHint.value = false;
+            loading.value = false;
+            currentStageHint.value = null;
+            ElMessage.error(`工作流异常: ${data.error}`);
+          },
+        });
+
+        showSlowHint.value = false;
+        if (slowHintTimer) clearTimeout(slowHintTimer);
+        slowHintTimer = setTimeout(() => {
+          showSlowHint.value = true;
+        }, 60000);
+      })
+      .catch(() => {
+        conv.messages.pop();
+        if (slowHintTimer) {
+          clearTimeout(slowHintTimer);
+          slowHintTimer = null;
+        }
+        showSlowHint.value = false;
+        ElMessage.error('启动分析失败，请检查后端服务');
+        loading.value = false;
+      });
+  }
 };
 
 const handleNewConversation = async () => {
@@ -468,11 +573,11 @@ const getStatusBadge = (status: string) => {
       <div class="chat-input-bar">
         <el-input
           v-model="inputTopic"
-          placeholder="输入你想分析的市场主题..."
+          :placeholder="inputPlaceholder"
           :disabled="loading"
           size="large"
           clearable
-          @keyup.enter="startAnalysis"
+          @keyup.enter="sendMessage"
           class="topic-input"
         >
           <template #prefix>
@@ -485,9 +590,9 @@ const getStatusBadge = (status: string) => {
           :icon="Promotion"
           :loading="loading"
           :disabled="!inputTopic.trim() || loading"
-          @click="startAnalysis"
+          @click="sendMessage"
         >
-          开始分析
+          {{ buttonText }}
         </el-button>
       </div>
     </div>
