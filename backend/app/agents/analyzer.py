@@ -141,12 +141,12 @@ SOURCE MATERIALS:
         return prompt
 
     @retry(
-        stop=stop_after_attempt(1),
+        stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, json.JSONDecodeError)),
         reraise=True
     )
-    async def _call_llm(self, prompt: str, timeout: int = 60) -> Dict[str, Any]:
+    async def _call_llm(self, prompt: str, timeout: int = 120) -> Dict[str, Any]:
         if self.llm_provider == "gpustack":
             payload = {
                 "model": self.default_model,
