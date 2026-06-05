@@ -42,8 +42,8 @@ const fetchReports = async () => {
       skip: skip.value,
       limit: pageSize,
     })
-    reports.value = res.data || []
-    total.value = (res as any).total ?? reports.value.length
+    reports.value = res.data?.items || []
+    total.value = res.data?.total ?? reports.value.length
   } catch (err) {
     ElMessage.error('获取研报列表失败')
   } finally {
@@ -324,13 +324,13 @@ onMounted(() => {
 .reports-container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
 }
 
 .table-card {
-  border-radius: 12px;
-  border: none;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .card-header {
@@ -340,9 +340,11 @@ onMounted(() => {
 }
 
 .card-title {
+  font-family: var(--scdc-font-display);
   font-weight: 600;
   font-size: 18px;
-  color: #1e222d;
+  color: var(--scdc-ink-strong);
+  letter-spacing: -0.01em;
 }
 
 .actions {
@@ -351,44 +353,61 @@ onMounted(() => {
   gap: 12px;
 }
 
+.actions :deep(.el-input__wrapper) {
+  border-radius: var(--scdc-radius-md);
+}
+
 .report-title {
   cursor: pointer;
-  color: #1e222d;
+  color: var(--scdc-ink);
   font-weight: 500;
+  transition: color var(--scdc-transition-fast);
 }
 
 .report-title:hover {
-  color: #409eff;
+  color: var(--scdc-accent);
 }
 
 .pagination-wrapper {
   display: flex;
   justify-content: center;
-  margin-top: 20px;
+  margin-top: 24px;
+  padding: 8px 0;
+}
+
+.preview-dialog :deep(.el-dialog__header) {
+  padding-bottom: 0;
 }
 
 .preview-dialog .markdown-body {
   font-size: 15px;
   line-height: 1.8;
-  color: #2d3748;
-  padding: 0 16px 32px 16px;
-  max-height: 60vh;
+  color: var(--scdc-ink);
+  padding: 0 8px 32px 8px;
+  max-height: 65vh;
   overflow-y: auto;
 }
 
 .preview-meta {
-  color: #718096;
-  font-size: 14px;
+  color: var(--scdc-ink-muted);
+  font-size: 13px;
+  padding: 8px 0;
 }
 
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3 {
-  color: #1a202c;
-  margin-top: 24px;
-  margin-bottom: 12px;
+  color: var(--scdc-ink-strong);
+  font-family: var(--scdc-font-display);
+  margin-top: 28px;
+  margin-bottom: 14px;
   font-weight: 700;
+  line-height: 1.3;
 }
+
+.markdown-body h1 { font-size: 24px; }
+.markdown-body h2 { font-size: 20px; }
+.markdown-body h3 { font-size: 17px; }
 
 .markdown-body p {
   margin-bottom: 16px;
@@ -400,11 +419,28 @@ onMounted(() => {
   margin-bottom: 16px;
 }
 
+.markdown-body th {
+  background: var(--scdc-bg-elevated);
+  font-weight: 600;
+}
+
 .markdown-body img {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
-  margin: 12px 0;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border-radius: var(--scdc-radius-md);
+  margin: 16px 0;
+  box-shadow: var(--scdc-shadow-soft);
+}
+
+/* 响应式优化 */
+@media (max-width: 1200px) {
+  .actions { flex-wrap: wrap; }
+  .actions :deep(.el-input) { width: 240px !important; }
+}
+
+@media (max-width: 900px) {
+  .card-header { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .actions { width: 100%; }
+  .actions :deep(.el-input) { flex: 1; min-width: 0; }
 }
 </style>

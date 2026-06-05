@@ -1,41 +1,31 @@
 /**
  * Vue Router 路由配置
  *
- * 定义前端页面路由结构和导航守卫逻辑。
+ * 定义前端页面路由结构。
  *
  * 路由设计：
- * - /login: 公开路由，不校验登录态
- * - / 及其子路由（dashboard/data-sources/tasks/reports/templates/settings）: 需要登录
+ * - 所有路由公开访问，无登录守卫
+ * - 登录态由 Pinia store（useAuthStore）持有
+ * - 受限页面（如 /workflow、/settings）由各 View 内部根据 auth.isAuthenticated
+ *   渲染"请登录"占位卡片，由 AuthModal 触发登录
  *
  * 为什么使用动态 import (() => import(...)):
  * - 实现路由级代码分割，Vite 自动将每个 view 打包为独立 chunk
  * - 首屏只加载当前路由所需代码，减少 bundle 体积
  *
  * 为什么使用嵌套路由 (children):
- * - / 路径下的页面共享 MainLayout 布局（侧边栏 + 顶栏）
+ * - / 路径下的页面共享 MainLayout 布局（顶栏 + 账户菜单）
  * - 路由切换只需替换 RouterView 内部组件，不重渲染布局
- *
- * beforeEach 导航守卫作用：
- * - 未登录访问受保护路由 → 重定向到 /login 并携带 redirect 参数
- * - 已登录访问 /login → 重定向到 Dashboard
  */
 
 import { createRouter, createWebHistory } from 'vue-router';
-import { useAuthStore } from '../stores/auth';
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
-      path: '/login',
-      name: 'login',
-      component: () => import('../views/LoginView.vue'),
-      meta: { title: '系统登录', requiresAuth: false },
-    },
-    {
       path: '/',
       component: () => import('../components/layout/MainLayout.vue'),
-      meta: { requiresAuth: true },
       children: [
         {
           path: '',
@@ -72,17 +62,6 @@ const router = createRouter({
       ],
     },
   ],
-});
-
-router.beforeEach((to, _from, next) => {
-  const authStore = useAuthStore();
-  if (to.meta.requiresAuth !== false && !authStore.isAuthenticated) {
-    next({ name: 'login', query: { redirect: to.fullPath } });
-  } else if (to.name === 'login' && authStore.isAuthenticated) {
-    next({ name: 'dashboard' });
-  } else {
-    next();
-  }
 });
 
 export default router;

@@ -31,17 +31,29 @@ let trendChart: echarts.ECharts | null = null;
 const fetchSummaryData = async () => {
   loading.value = true;
   try {
-    const [dsRes, tRes, rRes] = await Promise.all([
-      dataSourcesApi.getDataSources({ limit: 100 }),
-      tasksApi.getTasks({ limit: 100 }),
-      reportsApi.getReports({ limit: 5 }),
-    ]);
-    stats.value.dataSourcesCount = dsRes.data?.length || 0;
-    stats.value.tasksCount = tRes.data?.length || 0;
-    stats.value.reportsCount = rRes.data?.length || 0;
-    recentReports.value = rRes.data || [];
+    // 使用独立的 try-catch 处理每个 API 调用，避免一个失败影响其他
+    const dsRes = await dataSourcesApi.getDataSources({ limit: 100 }).catch((err: any) => {
+      console.warn('[HomeView] 获取数据源失败:', err);
+      return null;
+    });
+    const tRes = await tasksApi.getTasks({ limit: 100 }).catch((err: any) => {
+      console.warn('[HomeView] 获取任务列表失败:', err);
+      return null;
+    });
+    const rRes = await reportsApi.getReports({ skip: 0, limit: 5 }).catch((err: any) => {
+      console.warn('[HomeView] 获取报告列表失败:', err);
+      return null;
+    });
+
+    if (dsRes) stats.value.dataSourcesCount = dsRes.data?.length || 0;
+    if (tRes) stats.value.tasksCount = tRes.data?.length || 0;
+    if (rRes && rRes.data) {
+      stats.value.reportsCount = rRes.data.total ?? 0;
+      recentReports.value = rRes.data.items || [];
+    }
   } catch (err: any) {
-    ElMessage.error('获取统计数据异常');
+    console.error('[HomeView] 获取统计数据异常:', err);
+    // 不显示全局错误提示，避免与拦截器提示重复
   } finally {
     loading.value = false;
   }
@@ -70,7 +82,7 @@ const initStatisticsChart = () => {
     title: {
       text: '报告产出统计',
       left: 'center',
-      textStyle: { color: '#2d3748', fontSize: 16, fontWeight: 600 },
+      textStyle: { color: '#2B2419', fontSize: 18, fontWeight: 600, fontFamily: 'Fraunces, Georgia, serif' },
     },
     tooltip: {
       trigger: 'axis',
@@ -90,9 +102,13 @@ const initStatisticsChart = () => {
       axisTick: {
         alignWithLabel: true,
       },
+      axisLabel: { color: '#6B6258' },
+      axisLine: { lineStyle: { color: '#EAE3D2' } },
     },
     yAxis: {
       type: 'value',
+      axisLabel: { color: '#6B6258' },
+      splitLine: { lineStyle: { color: '#EAE3D2' } },
     },
     series: [
       {
@@ -101,11 +117,8 @@ const initStatisticsChart = () => {
         barWidth: '60%',
         data: statisticsData.value.map(item => item.count),
         itemStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: '#409eff' },
-            { offset: 1, color: '#67c23a' },
-          ]),
-          borderRadius: [4, 4, 0, 0],
+          color: '#B45309',
+          borderRadius: [6, 6, 0, 0],
         },
       },
     ],
@@ -144,24 +157,34 @@ const initTrendChart = () => {
     title: {
       text: '系统性能趋势',
       left: 'center',
-      textStyle: { color: '#2d3748', fontSize: 16, fontWeight: 600 },
+      textStyle: { color: '#2B2419', fontSize: 18, fontWeight: 600, fontFamily: 'Fraunces, Georgia, serif' },
     },
     tooltip: { trigger: 'axis' },
-    legend: { data: ['请求速率 (req/s)', 'P95 延迟 (ms)'], bottom: 0 },
+    legend: {
+      data: ['请求速率 (req/s)', 'P95 延迟 (ms)'],
+      bottom: 0,
+      textStyle: { color: '#2B2419', fontWeight: 600, fontFamily: 'Fraunces, Georgia, serif' },
+    },
     grid: { left: '3%', right: '4%', bottom: '12%', containLabel: true },
     xAxis: {
       type: 'category',
       data: metricsHistory.value.map(item => item.time),
       boundaryGap: false,
+      axisLabel: { color: '#6B6258' },
+      axisLine: { lineStyle: { color: '#EAE3D2' } },
     },
     yAxis: [
       {
         type: 'value',
         name: 'req/s',
+        axisLabel: { color: '#6B6258' },
+        splitLine: { lineStyle: { color: '#EAE3D2' } },
       },
       {
         type: 'value',
         name: 'ms',
+        axisLabel: { color: '#6B6258' },
+        splitLine: { lineStyle: { color: '#EAE3D2' } },
       },
     ],
     series: [
@@ -170,8 +193,9 @@ const initTrendChart = () => {
         type: 'line',
         data: metricsHistory.value.map(item => item.rps),
         smooth: true,
-        itemStyle: { color: '#409eff' },
-        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(64,158,255,0.3)' }, { offset: 1, color: 'rgba(64,158,255,0.05)' }]) },
+        itemStyle: { color: '#B45309' },
+        lineStyle: { color: '#B45309', width: 2 },
+        areaStyle: { color: 'rgba(180, 83, 9, 0.08)' },
       },
       {
         name: 'P95 延迟 (ms)',
@@ -179,7 +203,8 @@ const initTrendChart = () => {
         yAxisIndex: 1,
         data: metricsHistory.value.map(item => item.latency),
         smooth: true,
-        itemStyle: { color: '#e6a23c' },
+        itemStyle: { color: '#92400E' },
+        lineStyle: { color: '#92400E', width: 2 },
       },
     ],
   };
@@ -230,7 +255,7 @@ onUnmounted(() => {
         <el-card shadow="hover" class="metric-card-small">
           <div class="metric-card-small-content">
             <span class="metric-card-small-label">每秒请求</span>
-            <span class="metric-card-small-val" style="color: #409eff">{{ metricsData?.requests_per_second?.toFixed(1) || '--' }} req/s</span>
+            <span class="metric-card-small-val" style="color: var(--scdc-accent)">{{ metricsData?.requests_per_second?.toFixed(1) || '--' }} req/s</span>
           </div>
         </el-card>
       </el-col>
@@ -238,7 +263,7 @@ onUnmounted(() => {
         <el-card shadow="hover" class="metric-card-small">
           <div class="metric-card-small-content">
             <span class="metric-card-small-label">P95 延迟</span>
-            <span class="metric-card-small-val" style="color: #e6a23c">{{ metricsData?.latency_ms_p95?.toFixed(1) || '--' }} ms</span>
+            <span class="metric-card-small-val" style="color: var(--scdc-warning)">{{ metricsData?.latency_ms_p95?.toFixed(1) || '--' }} ms</span>
           </div>
         </el-card>
       </el-col>
@@ -246,7 +271,7 @@ onUnmounted(() => {
         <el-card shadow="hover" class="metric-card-small">
           <div class="metric-card-small-content">
             <span class="metric-card-small-label">错误率</span>
-            <span class="metric-card-small-val" :style="{ color: (metricsData?.error_rate ?? 0) > 5 ? '#f56c6c' : '#67c23a' }">{{ metricsData?.error_rate?.toFixed(2) || '--' }} %</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.error_rate ?? 0) > 5 ? 'var(--scdc-danger)' : 'var(--scdc-success)' }">{{ metricsData?.error_rate?.toFixed(2) || '--' }} %</span>
           </div>
         </el-card>
       </el-col>
@@ -254,7 +279,7 @@ onUnmounted(() => {
         <el-card shadow="hover" class="metric-card-small">
           <div class="metric-card-small-content">
             <span class="metric-card-small-label">CPU</span>
-            <span class="metric-card-small-val" :style="{ color: (metricsData?.cpu_percent ?? 0) > 80 ? '#f56c6c' : '#409eff' }">{{ metricsData?.cpu_percent?.toFixed(1) || '--' }} %</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.cpu_percent ?? 0) > 80 ? 'var(--scdc-danger)' : 'var(--scdc-accent)' }">{{ metricsData?.cpu_percent?.toFixed(1) || '--' }} %</span>
           </div>
         </el-card>
       </el-col>
@@ -262,7 +287,7 @@ onUnmounted(() => {
         <el-card shadow="hover" class="metric-card-small">
           <div class="metric-card-small-content">
             <span class="metric-card-small-label">内存</span>
-            <span class="metric-card-small-val" :style="{ color: (metricsData?.memory_percent ?? 0) > 80 ? '#f56c6c' : '#409eff' }">{{ metricsData?.memory_percent?.toFixed(1) || '--' }} %</span>
+            <span class="metric-card-small-val" :style="{ color: (metricsData?.memory_percent ?? 0) > 80 ? 'var(--scdc-danger)' : 'var(--scdc-accent)' }">{{ metricsData?.memory_percent?.toFixed(1) || '--' }} %</span>
           </div>
         </el-card>
       </el-col>
@@ -353,33 +378,50 @@ onUnmounted(() => {
 .dashboard-container {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 28px;
 }
 
 .banner {
-  background: linear-gradient(135deg, #2b3040 0%, #161922 100%);
-  color: white;
-  padding: 32px 40px;
-  border-radius: 16px;
+  background: var(--scdc-bg-surface);
+  border: 1px solid var(--scdc-bg-sunken);
+  border-radius: var(--scdc-radius-lg);
+  padding: 40px 48px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--scdc-shadow-soft);
+  position: relative;
+  overflow: hidden;
+}
+
+.banner::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at top right, rgba(180, 83, 9, 0.06), transparent 60%);
+  pointer-events: none;
+}
+
+.banner-content {
+  position: relative;
+  z-index: 1;
 }
 
 .banner h2 {
+  font-family: var(--scdc-font-display);
+  color: var(--scdc-ink-strong);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   margin: 0 0 10px 0;
-  font-size: 26px;
-  font-weight: 700;
-  background: linear-gradient(135deg, #409eff, #67c23a);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  line-height: 1.2;
 }
 
 .banner p {
   margin: 0;
-  color: #a0aec0;
-  font-size: 15px;
+  color: var(--scdc-ink-muted);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .main-content {
@@ -397,62 +439,76 @@ onUnmounted(() => {
 }
 
 .metric-card {
-  border-radius: 12px;
-  border: none;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
   display: flex;
   align-items: center;
-  padding: 10px;
+  padding: 20px;
+  box-shadow: var(--scdc-shadow-soft);
+  transition: transform var(--scdc-transition-base), box-shadow var(--scdc-transition-base);
+}
+
+.metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--scdc-shadow-lift);
 }
 
 .metric-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 12px;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
+  font-size: 26px;
   margin-right: 16px;
+  flex-shrink: 0;
 }
 
-.reports-card .metric-icon { background: rgba(103, 194, 58, 0.1); color: #67c23a; }
+.reports-card .metric-icon { background: var(--scdc-accent-soft); color: var(--scdc-accent); }
 
-.health-card .metric-icon { background: rgba(64, 158, 255, 0.1); color: #409eff; }
+.health-card .metric-icon { background: var(--scdc-success-soft); color: var(--scdc-success); }
 
 .metric-title {
-  font-size: 14px;
-  color: #718096;
-  margin-bottom: 4px;
+  font-size: 13px;
+  color: var(--scdc-ink-muted);
+  margin-bottom: 6px;
+  font-weight: 500;
 }
 
 .metric-val {
-  font-size: 26px;
-  font-weight: 700;
-  color: #2d3748;
+  font-family: var(--scdc-font-display);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  line-height: 1;
 }
 
 .metric-unit {
   font-size: 14px;
-  font-weight: normal;
-  color: #a0aec0;
+  font-weight: 400;
+  color: var(--scdc-ink-soft);
+  margin-left: 2px;
 }
 
 .statistics-card {
-  border-radius: 12px;
-  border: none;
-  height: 500px;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  height: 480px;
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .recent-reports-card {
-  border-radius: 12px;
-  border: none;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
   flex: 1;
-  min-height: 300px;
+  min-height: 280px;
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .echarts-box {
   width: 100%;
-  height: 420px;
+  height: 400px;
 }
 
 .card-header {
@@ -462,8 +518,10 @@ onUnmounted(() => {
 }
 
 .card-title {
+  font-family: var(--scdc-font-display);
+  font-size: 17px;
+  color: var(--scdc-ink-strong);
   font-weight: 600;
-  font-size: 16px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -471,29 +529,42 @@ onUnmounted(() => {
 
 .period-buttons {
   display: flex;
-  gap: 8px;
+  gap: 6px;
+}
+
+.period-buttons :deep(.el-button) {
+  font-weight: 500;
+  min-width: 40px;
 }
 
 .view-all-link {
-  color: #409eff;
-  font-size: 14px;
+  color: var(--scdc-accent);
+  font-size: 13px;
   text-decoration: none;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: color var(--scdc-transition-fast);
+  font-weight: 500;
 }
 
 .view-all-link:hover {
-  opacity: 0.8;
-  text-decoration: underline;
+  color: var(--scdc-accent-hover);
+  text-decoration: none;
 }
 
 .metrics-row {
-  margin-bottom: 24px;
+  margin-bottom: 4px;
 }
 
 .metric-card-small {
-  border-radius: 12px;
-  border: none;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
+  transition: transform var(--scdc-transition-base), box-shadow var(--scdc-transition-base);
+}
+
+.metric-card-small:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--scdc-shadow-lift);
 }
 
 .metric-card-small-content {
@@ -501,22 +572,53 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
+  padding: 16px 8px;
 }
 
 .metric-card-small-label {
-  font-size: 13px;
-  color: #718096;
+  font-size: 12px;
+  color: var(--scdc-ink-muted);
+  font-weight: 500;
+  letter-spacing: 0.02em;
 }
 
 .metric-card-small-val {
+  font-family: var(--scdc-font-display);
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  line-height: 1;
 }
 
 .trend-chart-card {
-  border-radius: 12px;
-  border: none;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
   margin-bottom: 20px;
+  box-shadow: var(--scdc-shadow-soft);
+}
+
+/* 响应式优化 */
+@media (max-width: 1200px) {
+  .banner { padding: 32px 36px; }
+  .banner h2 { font-size: 24px; }
+  .metric-val { font-size: 26px; }
+  .metric-icon { width: 48px; height: 48px; font-size: 24px; }
+  .metric-card-small-val { font-size: 20px; }
+  .echarts-box { height: 360px; }
+}
+
+@media (max-width: 900px) {
+  .banner { 
+    padding: 24px; 
+    flex-direction: column;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .banner h2 { font-size: 22px; }
+  .metric-card-small-content { padding: 12px 4px; }
+  .metric-card-small-val { font-size: 18px; }
+  .main-content { flex-direction: column; }
+  .stat-cards-top { flex-direction: column; }
+  .echarts-box { height: 320px; }
 }
 </style>

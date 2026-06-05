@@ -1,216 +1,244 @@
 <script setup lang="ts">
-/**
- * 主布局组件（侧边栏 + 顶部导航）
- *
- * 所有需要登录认证的页面共享此布局。
- *
- * 为什么侧边栏用 el-menu 的 router 属性：
- * - el-menu 原生支持 router-link 集成，点击菜单项自动触发路由切换
- * - default-active 绑定 route.path 自动高亮当前页面菜单项
- *
- * 为什么可折叠设计（isCollapse）：
- * - 收起侧边栏释放横向空间，适配较小屏幕或用户偏好
- * - el-menu 的 collapse 属性原生支持折叠动画
- *
- * 为什么使用 transition 包裹 RouterView：
- * - fade-transform 动画提供页面切换的视觉过渡，提升用户体验
- * - mode="out-in" 确保旧页面完全离开再进入新页面，避免布局闪烁
- */
-import { ref } from 'vue';
-import { useRoute } from 'vue-router';
-import { useAuthStore } from '../../stores/auth';
-import {
-  House,
-  DataLine,
-  Document,
-  Setting,
-  SwitchButton,
-  Fold,
-  Expand
-} from '@element-plus/icons-vue';
+import { computed, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { useI18n } from 'vue-i18n';
+import { useAuthStore } from '@/stores/auth';
+import AuthModal from '@/components/account/AuthModal.vue';
+import AccountMenu from '@/components/account/AccountMenu.vue';
 
-const authStore = useAuthStore();
 const route = useRoute();
+const router = useRouter();
+const { t } = useI18n();
+const auth = useAuthStore();
 
-const isCollapse = ref(false);
+const activeIndex = computed(() => route.path);
 
-const toggleCollapse = () => {
-  isCollapse.value = !isCollapse.value;
-};
+const authModalVisible = ref(false);
+const accountMenuRef = ref<InstanceType<typeof AccountMenu> | null>(null);
 
-const handleLogout = () => {
-  authStore.logout();
-};
+const menuItems = [
+  { path: '/', key: 'nav.dashboard' },
+  { path: '/workflow', key: 'nav.workflow' },
+  { path: '/reports', key: 'nav.reports' },
+  { path: '/settings', key: 'nav.settings' },
+];
+
+function onMenuSelect(index: string) {
+  router.push(index);
+}
+
+function openAuthModal() {
+  authModalVisible.value = true;
+}
+
+function onAuthSuccess() {
+  authModalVisible.value = false;
+  // auth store 已通过 fetchCurrentUser 自动更新 user
+}
 </script>
 
 <template>
   <el-container class="main-layout">
-    <el-aside :width="isCollapse ? '64px' : '240px'" class="aside">
-      <div class="logo-area">
-        <span v-if="!isCollapse" class="logo-text">SCDC 洞察智能体</span>
-        <span v-else class="logo-text-short">AI</span>
+    <el-header class="header" height="72px">
+      <!-- 左：品牌区 -->
+      <div class="brand">
+        <div class="brand-name">
+          <span class="brand-accent">U-</span>{{ t('brand.name').replace('U-', '') }}
+        </div>
+        <div class="brand-company">{{ t('brand.company') }}</div>
       </div>
+
+      <!-- 中：水平导航 -->
       <el-menu
-        :default-active="route.path"
-        class="side-menu"
-        :collapse="isCollapse"
-        background-color="#1e222d"
-        text-color="#a0aec0"
-        active-text-color="#ffffff"
-        router
+        mode="horizontal"
+        :default-active="activeIndex"
+        :ellipsis="false"
+        class="top-menu"
+        @select="onMenuSelect"
       >
-        <el-menu-item index="/">
-          <el-icon><House /></el-icon>
-          <template #title>仪表盘 Dashboard</template>
-        </el-menu-item>
-        <el-menu-item index="/workflow">
-          <el-icon><DataLine /></el-icon>
-          <template #title>智能体工作流 Workflow</template>
-        </el-menu-item>
-        <el-menu-item index="/reports">
-          <el-icon><Document /></el-icon>
-          <template #title>智能报告 Reports</template>
-        </el-menu-item>
-        <el-menu-item index="/settings">
-          <el-icon><Setting /></el-icon>
-          <template #title>系统设置 Settings</template>
+        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+          {{ t(item.key) }}
         </el-menu-item>
       </el-menu>
-    </el-aside>
-    <el-container>
-      <el-header class="header">
-        <div class="header-left">
-          <el-button text @click="toggleCollapse">
-            <el-icon :size="20"><Expand v-if="isCollapse" /><Fold v-else /></el-icon>
-          </el-button>
-          <el-breadcrumb separator="/" class="breadcrumb">
-            <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
-            <el-breadcrumb-item>{{ route.meta.title || route.name }}</el-breadcrumb-item>
-          </el-breadcrumb>
-        </div>
-        <div class="header-right">
-          <div class="user-info" v-if="authStore.user">
-            <el-avatar :size="32" src="https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png" />
-            <span class="username">{{ authStore.user.username }}</span>
-            <el-tag size="small" type="success" class="role-tag">{{ authStore.user.role }}</el-tag>
-          </div>
-          <el-button type="danger" text @click="handleLogout" title="退出登录">
-            <el-icon :size="18"><SwitchButton /></el-icon>
-          </el-button>
-        </div>
-      </el-header>
-      <el-main class="main-content">
-        <router-view v-slot="{ Component }">
-          <transition name="fade-transform" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
-      </el-main>
-    </el-container>
+
+      <!-- 右：登录按钮 / 头像 -->
+      <div class="header-right">
+        <template v-if="auth.isAuthenticated">
+          <AccountMenu ref="accountMenuRef" />
+        </template>
+        <el-button
+          v-else
+          type="primary"
+          round
+          class="login-btn"
+          @click="openAuthModal"
+        >
+          {{ t('auth.loginRegister') }}
+        </el-button>
+      </div>
+    </el-header>
+
+    <!-- 面包屑（保留在头部下方） -->
+    <div class="breadcrumb-bar">
+      <el-breadcrumb separator="/">
+        <el-breadcrumb-item :to="{ path: '/' }">{{ t('nav.dashboard') }}</el-breadcrumb-item>
+        <el-breadcrumb-item v-if="route.meta.title">{{ route.meta.title }}</el-breadcrumb-item>
+      </el-breadcrumb>
+    </div>
+
+    <el-main class="main-content">
+      <router-view v-slot="{ Component }">
+        <transition name="fade" mode="out-in">
+          <component :is="Component" />
+        </transition>
+      </router-view>
+    </el-main>
+
+    <!-- 登录 / 注册模态 -->
+    <AuthModal v-model:visible="authModalVisible" @success="onAuthSuccess" />
   </el-container>
 </template>
 
 <style scoped>
 .main-layout {
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
-  background-color: #f5f7fa;
-}
-
-.aside {
-  background-color: #1e222d;
-  transition: width 0.3s ease;
-  display: flex;
-  flex-direction: column;
-}
-
-.logo-area {
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: #161922;
-  color: white;
-  font-weight: bold;
-  letter-spacing: 1px;
-}
-
-.logo-text {
-  font-size: 18px;
-  background: linear-gradient(135deg, #409eff, #67c23a);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.logo-text-short {
-  font-size: 20px;
-  color: #409eff;
-}
-
-.side-menu {
-  border-right: none;
-  flex: 1;
-}
-
-.side-menu .el-menu-item.is-active {
-  background-color: #2b3040 !important;
-  border-left: 4px solid #409eff;
+  min-height: 100vh;
+  background: var(--scdc-bg-canvas);
 }
 
 .header {
-  background-color: white;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  height: 60px;
-  padding: 0 20px;
+  gap: 40px;
+  padding: 0 40px;
+  background: var(--scdc-bg-surface);
+  border-bottom: 1px solid var(--scdc-bg-sunken);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.04);
 }
 
-.header-left, .header-right {
+/* 品牌区 */
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 180px;
+}
+.brand-name {
+  font-family: var(--scdc-font-display);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+.brand-accent {
+  color: var(--scdc-accent);
+}
+.brand-company {
+  font-family: var(--scdc-font-body);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--scdc-ink-muted);
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: none;
+}
+
+/* 水平菜单 */
+.top-menu {
+  flex: 1;
+  border-bottom: none !important;
+  min-width: 0;
+}
+.top-menu :deep(.el-menu-item) {
+  font-family: var(--scdc-font-body);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--scdc-ink-muted);
+  padding: 0 24px !important;
+  height: 64px;
+  line-height: 64px;
+  border-bottom: 2px solid transparent !important;
+  transition: color var(--scdc-transition-fast), border-color var(--scdc-transition-fast);
+}
+.top-menu :deep(.el-menu-item:hover) {
+  color: var(--scdc-ink);
+  border-bottom-color: transparent !important;
+  background: var(--scdc-bg-hover) !important;
+}
+.top-menu :deep(.el-menu-item.is-active) {
+  color: var(--scdc-accent);
+  font-weight: 600;
+  border-bottom-color: var(--scdc-accent) !important;
+  background: transparent !important;
+}
+
+/* 右侧区域 */
+.header-right {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-shrink: 0;
 }
-
-.breadcrumb {
-  margin-left: 8px;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.username {
+.login-btn {
+  font-family: var(--scdc-font-body);
+  font-size: 14px;
+  height: 36px;
+  padding: 0 24px;
+  letter-spacing: 0.03em;
   font-weight: 500;
-  color: #2d3748;
 }
 
-.role-tag {
-  text-transform: uppercase;
+/* 面包屑 */
+.breadcrumb-bar {
+  padding: 12px 40px 0;
+  background: var(--scdc-bg-canvas);
+}
+.breadcrumb-bar :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
+  color: var(--scdc-ink);
+  font-weight: 500;
+}
+.breadcrumb-bar :deep(.el-breadcrumb__item:not(:last-child) .el-breadcrumb__inner) {
+  color: var(--scdc-ink-muted);
 }
 
+/* 主内容 */
 .main-content {
-  padding: 24px;
-  overflow-y: auto;
-  height: 100%;
+  padding: 28px 40px 56px;
+  background: var(--scdc-bg-canvas);
+  max-width: 1440px;
+  margin: 0 auto;
+  width: 100%;
 }
 
-.fade-transform-enter-active,
-.fade-transform-leave-active {
-  transition: all 0.2s ease;
+/* 路由切换淡入 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 180ms ease;
 }
-
-.fade-transform-enter-from {
+.fade-enter-from,
+.fade-leave-to {
   opacity: 0;
-  transform: translateX(10px);
 }
 
-.fade-transform-leave-to {
-  opacity: 0;
-  transform: translateX(-10px);
+/* 响应式 */
+@media (max-width: 1200px) {
+  .header { gap: 24px; padding: 0 24px; }
+  .brand { min-width: 140px; }
+  .top-menu :deep(.el-menu-item) { padding: 0 16px !important; }
+  .breadcrumb-bar { padding-left: 24px; padding-right: 24px; }
+  .main-content { padding: 24px 24px 48px; }
+}
+
+@media (max-width: 900px) {
+  .header { gap: 16px; padding: 0 16px; }
+  .brand { min-width: auto; }
+  .brand-company { display: none; }
+  .top-menu :deep(.el-menu-item) { padding: 0 12px !important; }
+  .breadcrumb-bar { padding-left: 16px; padding-right: 16px; }
+  .main-content { padding: 16px; }
 }
 </style>

@@ -21,7 +21,7 @@ from app.services.task import TaskService
 router = APIRouter()
 task_service = TaskService()
 
-@router.post("", response_model=ResponseModel[TaskOut])
+@router.post("/", response_model=ResponseModel[TaskOut])
 async def create_task(
     request: TaskCreate,
     current_user: User = Depends(get_current_active_user),
@@ -31,7 +31,7 @@ async def create_task(
     task = await task_service.create_task(session, request, current_user.id)
     return success_response(data=task)
 
-@router.get("", response_model=ResponseModel[List[TaskOut]])
+@router.get("/", response_model=ResponseModel[List[TaskOut]])
 async def list_tasks(
     skip: int = 0,
     limit: int = 100,

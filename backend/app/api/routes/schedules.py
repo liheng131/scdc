@@ -19,7 +19,7 @@ from app.services.scheduler import SchedulerService
 router = APIRouter()
 scheduler_service = SchedulerService()
 
-@router.post("", response_model=ResponseModel)
+@router.post("/", response_model=ResponseModel)
 async def create_scheduled_job(
     sched: ScheduleCreate,
     current_user: User = Depends(get_current_active_user),
@@ -28,7 +28,7 @@ async def create_scheduled_job(
     out = await scheduler_service.create_schedule(session, sched, current_user.id)
     return success_response(data=out.model_dump())
 
-@router.get("", response_model=ResponseModel)
+@router.get("/", response_model=ResponseModel)
 async def list_scheduled_jobs(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)

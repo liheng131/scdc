@@ -367,6 +367,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     streamCallbacks.value = {};
   };
 
+  const stopWorkflow = () => {
+    clearEventSource();
+    if (activeConversation.value) {
+      updateConversationStatus(activeConversation.value.id, 'completed');
+    }
+  };
+
   const loadHistoryFromServer = async () => {
     try {
       const res = await workflowApi.getHistory();
@@ -432,6 +439,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     resetActiveConversation,
     startWorkflowStream,
     clearEventSource,
+    stopWorkflow,
     loadHistoryFromServer,
   };
 });

@@ -213,9 +213,9 @@ onMounted(() => {
 }
 
 .table-card {
-  border-radius: 12px;
-  border: none;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .card-header {
@@ -225,9 +225,10 @@ onMounted(() => {
 }
 
 .card-title {
+  font-family: var(--scdc-font-display);
   font-weight: 600;
   font-size: 18px;
-  color: #1e222d;
+  color: var(--scdc-ink-strong);
 }
 
 .actions {
@@ -241,10 +242,13 @@ onMounted(() => {
 }
 
 .json-code {
-  background-color: #2b3040;
-  color: #a0aec0;
+  background-color: var(--scdc-bg-elevated);
+  color: var(--scdc-ink);
   padding: 16px;
-  border-radius: 8px;
+  border-radius: var(--scdc-radius-md);
   overflow-x: auto;
+  font-family: var(--scdc-font-mono);
+  font-size: 13px;
+  border: 1px solid var(--scdc-bg-sunken);
 }
 </style>

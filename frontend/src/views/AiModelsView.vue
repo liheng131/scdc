@@ -598,9 +598,9 @@ onMounted(() => {
 }
 
 .settings-card {
-  border-radius: 12px;
-  border: none;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .models-tabs {
@@ -614,11 +614,11 @@ onMounted(() => {
 }
 
 .api-key-unset {
-  color: #c0c4cc;
+  color: var(--scdc-ink-soft);
   font-style: italic;
 }
 
 .not-default {
-  color: #c0c4cc;
+  color: var(--scdc-ink-soft);
 }
 </style>

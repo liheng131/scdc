@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import { Promotion, Download, CopyDocument, Delete, ChatLineSquare, Refresh, Plus } from '@element-plus/icons-vue';
+import { useI18n } from 'vue-i18n';
+import { Promotion, Download, CopyDocument, Delete, Refresh, Plus, Close } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as echarts from 'echarts';
 import { workflowApi, reportsApi } from '../api';
 import { useWorkflowStore } from '../stores/workflow';
+import { useAuthStore } from '@/stores/auth';
+
+const auth = useAuthStore();
+const { t } = useI18n();
 
 interface StageHint {
   icon: string;
@@ -19,7 +24,7 @@ let slowHintTimer: ReturnType<typeof setTimeout> | null = null;
 const currentStageHint = ref<StageHint | null>(null);
 const chatContainer = ref<HTMLElement | null>(null);
 const chartRefs = ref<Map<number, HTMLElement>>(new Map());
-const showHistorySidebar = ref(false);
+const showSidebar = ref(false);
 const currentWorkflowId = ref<string | null>(null);
 const reportIdCache = ref<Record<string, number>>({});
 
@@ -51,6 +56,7 @@ onUnmounted(() => {
 });
 
 watch(() => workflowStore.activeConversationId, () => {
+  showSidebar.value = false;
   nextTick(() => {
     chartRefs.value.forEach((el) => {
       const instance = echarts.getInstanceByDom(el);
@@ -89,6 +95,17 @@ const buttonText = computed(() => {
 const quickAsk = (topic: string) => {
   inputTopic.value = topic;
   sendMessage();
+};
+
+const handleStop = () => {
+  workflowStore.stopWorkflow();
+  loading.value = false;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+  showSlowHint.value = false;
+  currentStageHint.value = null;
 };
 
 const sendMessage = () => {
@@ -310,7 +327,6 @@ const handleNewConversation = async () => {
 
 const selectConversation = (id: string) => {
   workflowStore.setActiveConversation(id);
-  showHistorySidebar.value = false;
 };
 
 const handleDeleteConversation = async (id: string) => {
@@ -448,18 +464,58 @@ const getStatusBadge = (status: string) => {
 </script>
 
 <template>
-  <div class="workflow-layout">
-    <div class="insight-chat">
+  <div v-if="auth.isAuthenticated" class="workflow-layout">
+    <!-- Mobile overlay -->
+    <div v-if="showSidebar" class="sidebar-overlay" @click="showSidebar = false"></div>
+
+    <!-- Left sidebar -->
+    <aside class="sidebar" :class="{ 'sidebar-open': showSidebar }">
+      <div class="sidebar-header">
+        <el-button type="primary" :icon="Plus" @click="handleNewConversation" class="new-chat-btn">
+          新建对话
+        </el-button>
+      </div>
+      <div class="sidebar-divider">
+        <span>历史记录</span>
+        <el-button text size="small" :icon="Refresh" @click="workflowStore.loadHistoryFromServer()" />
+      </div>
+      <div class="history-list">
+        <div v-if="workflowStore.conversations.length === 0" class="history-empty">
+          <p>暂无历史对话</p>
+        </div>
+        <div
+          v-for="conv in workflowStore.conversations"
+          :key="conv.id"
+          :class="['history-item', { active: conv.id === workflowStore.activeConversationId }]"
+          @click="selectConversation(conv.id)"
+        >
+          <div class="history-item-content">
+            <div class="history-item-title">{{ conv.topic }}</div>
+            <div class="history-item-meta">
+              <span :class="['status-badge', getStatusBadge(conv.status).class]">
+                {{ getStatusBadge(conv.status).text }}
+              </span>
+              <span class="history-item-time">{{ formatTime(conv.updatedAt) }}</span>
+            </div>
+          </div>
+          <el-button
+            text
+            size="small"
+            :icon="Delete"
+            class="history-item-delete"
+            @click.stop="handleDeleteConversation(conv.id)"
+          />
+        </div>
+      </div>
+    </aside>
+
+    <!-- Right chat area -->
+    <main class="chat-area">
       <div class="chat-header">
-        <h2 class="chat-title">
-          <el-button text :icon="ChatLineSquare" @click="showHistorySidebar = !showHistorySidebar">
-            历史记录
-          </el-button>
-          <el-button text :icon="Plus" @click="handleNewConversation">
-            新建对话
-          </el-button>
-        </h2>
-        <div v-if="workflowStore.activeConversation" class="current-topic">
+        <button class="hamburger-btn" @click="showSidebar = !showSidebar">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="current-topic" v-if="workflowStore.activeConversation">
           {{ workflowStore.activeConversation.topic }}
         </div>
       </div>
@@ -585,115 +641,257 @@ const getStatusBadge = (status: string) => {
           </template>
         </el-input>
         <el-button
+          v-if="loading"
+          type="danger"
+          size="large"
+          :icon="Close"
+          @click="handleStop"
+          class="stop-btn"
+        >
+          停止
+        </el-button>
+        <el-button
+          v-else
           type="primary"
           size="large"
           :icon="Promotion"
-          :loading="loading"
-          :disabled="!inputTopic.trim() || loading"
+          :disabled="!inputTopic.trim()"
           @click="sendMessage"
+          class="send-btn"
         >
           {{ buttonText }}
         </el-button>
       </div>
+    </main>
+  </div>
+  <div v-else class="auth-placeholder">
+    <div class="placeholder-inner">
+      <div class="placeholder-icon">U</div>
+      <h2 class="placeholder-title">{{ t('placeholder.needLogin') }}</h2>
+      <p class="placeholder-desc">{{ t('placeholder.needLoginDesc') }}</p>
+      <p class="placeholder-brand">{{ t('brand.name') }} · {{ t('brand.company') }}</p>
     </div>
-
-    <transition name="slide">
-      <div v-if="showHistorySidebar" class="history-sidebar">
-        <div class="history-header">
-          <h3>历史对话</h3>
-          <div class="history-actions">
-            <el-button text size="small" :icon="Refresh" @click="workflowStore.loadHistoryFromServer()">
-              刷新
-            </el-button>
-            <el-button text size="small" @click="showHistorySidebar = false">
-              ✕
-            </el-button>
-          </div>
-        </div>
-        <div class="history-list">
-          <div v-if="workflowStore.conversations.length === 0" class="history-empty">
-            <p>暂无历史对话</p>
-          </div>
-          <div
-            v-for="conv in workflowStore.conversations"
-            :key="conv.id"
-            :class="['history-item', { active: conv.id === workflowStore.activeConversationId }]"
-            @click="selectConversation(conv.id)"
-          >
-            <div class="history-item-content">
-              <div class="history-item-title">{{ conv.topic }}</div>
-              <div class="history-item-meta">
-                <span :class="['status-badge', getStatusBadge(conv.status).class]">
-                  {{ getStatusBadge(conv.status).text }}
-                </span>
-                <span class="history-item-time">{{ formatTime(conv.updatedAt) }}</span>
-              </div>
-            </div>
-            <el-button
-              text
-              size="small"
-              :icon="Delete"
-              class="history-item-delete"
-              @click.stop="handleDeleteConversation(conv.id)"
-            />
-          </div>
-        </div>
-      </div>
-    </transition>
   </div>
 </template>
 
 <style scoped>
+/* ===== Layout ===== */
 .workflow-layout {
   display: flex;
-  height: calc(100vh - 140px);
+  height: calc(100vh - 120px);
   position: relative;
+  overflow: hidden;
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
-.insight-chat {
+/* ===== Sidebar ===== */
+.sidebar {
+  width: 280px;
+  background: var(--scdc-bg-elevated);
+  border-right: 1px solid var(--scdc-bg-sunken);
   display: flex;
   flex-direction: column;
-  flex: 1;
-  max-width: 900px;
-  margin: 0 auto;
+  flex-shrink: 0;
+  z-index: 100;
+  transition: transform 0.3s ease;
+}
+
+.sidebar-header {
+  padding: 20px;
+}
+
+.new-chat-btn {
   width: 100%;
-  transition: margin-right 0.3s ease;
+  font-weight: 600;
+  border-radius: 12px;
+  height: 44px;
+  font-size: 14px;
+}
+
+.sidebar-divider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 20px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--scdc-ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px 12px;
+}
+
+.history-empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--scdc-ink-soft);
+  font-size: 13px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 4px;
+  border-left: 3px solid transparent;
+}
+
+.history-item:hover {
+  background: var(--scdc-bg-hover);
+}
+
+.history-item.active {
+  background: var(--scdc-accent-soft);
+  border-left-color: var(--scdc-accent);
+}
+
+.history-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--scdc-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 6px;
+}
+
+.history-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.status-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.status-running {
+  background: var(--scdc-warning-soft);
+  color: var(--scdc-warning);
+}
+
+.status-completed {
+  background: var(--scdc-success-soft);
+  color: var(--scdc-success);
+}
+
+.status-failed {
+  background: var(--scdc-danger-soft);
+  color: var(--scdc-danger);
+}
+
+.status-idle {
+  background: var(--scdc-bg-elevated);
+  color: var(--scdc-ink-muted);
+}
+
+.history-item-time {
+  color: var(--scdc-ink-soft);
+}
+
+.history-item-delete {
+  opacity: 0;
+  transition: opacity 0.2s;
+  color: var(--scdc-danger);
+}
+
+.history-item:hover .history-item-delete {
+  opacity: 1;
+}
+
+/* ===== Sidebar overlay (mobile) ===== */
+.sidebar-overlay {
+  display: none;
+}
+
+/* ===== Chat area ===== */
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--scdc-bg-canvas);
 }
 
 .chat-header {
   display: flex;
   align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid #e2e8f0;
-  gap: 12px;
+  gap: 14px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--scdc-bg-sunken);
+  min-height: 56px;
+  background: var(--scdc-bg-surface);
 }
 
-.chat-title {
-  margin: 0;
-  font-size: 16px;
+.hamburger-btn {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.hamburger-btn:hover {
+  background: var(--scdc-bg-hover);
+}
+
+.hamburger-btn span {
+  width: 20px;
+  height: 2px;
+  background: var(--scdc-ink);
+  border-radius: 1px;
+  transition: all 0.2s;
 }
 
 .current-topic {
-  font-size: 14px;
-  color: #718096;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  font-family: var(--scdc-font-display);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* ===== Messages ===== */
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 0;
+  padding: 28px 0;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
 }
 
 .slow-hint {
-  margin-bottom: 12px;
+  margin: 0 24px 14px;
 }
 
+/* ===== Empty state ===== */
 .empty-state {
   flex: 1;
   display: flex;
@@ -701,27 +899,42 @@ const getStatusBadge = (status: string) => {
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 60px 40px;
+  padding: 80px 40px;
+  animation: fadeInUp 0.5s ease-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .empty-icon {
-  font-size: 56px;
-  margin-bottom: 16px;
+  font-size: 72px;
+  margin-bottom: 24px;
+  opacity: 0.9;
 }
 
 .empty-state h2 {
-  font-size: 24px;
-  font-weight: 700;
-  color: #2d3748;
-  margin: 0 0 8px;
+  font-family: var(--scdc-font-display);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  margin: 0 0 10px;
+  letter-spacing: -0.01em;
 }
 
 .empty-state p {
   font-size: 14px;
-  color: #718096;
-  max-width: 460px;
-  line-height: 1.6;
-  margin: 0 0 24px;
+  color: var(--scdc-ink-muted);
+  max-width: 500px;
+  line-height: 1.7;
+  margin: 0 0 32px;
 }
 
 .suggestions-row {
@@ -732,26 +945,33 @@ const getStatusBadge = (status: string) => {
 }
 
 .suggestion-tag {
-  padding: 8px 18px;
-  background: #f0f4ff;
-  color: #409eff;
-  border-radius: 20px;
+  padding: 10px 20px;
+  background: var(--scdc-bg-surface);
+  color: var(--scdc-ink);
+  border-radius: var(--scdc-radius-md);
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.2s;
-  border: 1px solid transparent;
+  transition: all 0.2s ease;
+  border: 1px solid var(--scdc-bg-sunken);
+  font-weight: 500;
 }
 
 .suggestion-tag:hover {
-  background: #e6f0ff;
-  border-color: #409eff;
+  background: var(--scdc-accent-soft);
+  border-color: var(--scdc-accent);
+  color: var(--scdc-accent);
   transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(180, 83, 9, 0.1);
 }
 
+/* ===== Message rows ===== */
 .message-row {
   display: flex;
-  gap: 12px;
-  padding: 0 16px;
+  gap: 14px;
+  padding: 0 24px;
+  max-width: 850px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .user-row {
@@ -759,43 +979,44 @@ const getStatusBadge = (status: string) => {
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 18px;
   flex-shrink: 0;
 }
 
 .user-avatar {
-  background: #e6f0ff;
+  background: var(--scdc-accent-soft);
 }
 
 .assistant-avatar {
-  background: #f0fdf4;
+  background: var(--scdc-success-soft);
 }
 
 .message-bubble {
-  padding: 12px 18px;
-  border-radius: 14px;
+  padding: 14px 20px;
   font-size: 14px;
-  line-height: 1.6;
-  max-width: 85%;
+  line-height: 1.7;
+  max-width: 80%;
 }
 
 .user-bubble {
-  background: #409eff;
+  background: var(--scdc-accent);
   color: white;
-  border-bottom-right-radius: 4px;
+  border-radius: 18px 18px 4px 18px;
+  box-shadow: 0 2px 6px rgba(180, 83, 9, 0.15);
 }
 
 .assistant-bubble {
-  background: #f7f8fa;
-  color: #2d3748;
-  border-bottom-left-radius: 4px;
-  border: 1px solid #e2e8f0;
+  background: var(--scdc-bg-surface);
+  color: var(--scdc-ink);
+  border-radius: 18px 18px 18px 4px;
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.04);
 }
 
 .message-body {
@@ -803,13 +1024,14 @@ const getStatusBadge = (status: string) => {
   min-width: 0;
 }
 
+/* ===== Stage hints & stats ===== */
 .stage-hint-banner {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 6px 0;
   font-size: 13px;
-  color: #718096;
+  color: var(--scdc-ink-muted);
   margin-bottom: 4px;
 }
 
@@ -819,9 +1041,9 @@ const getStatusBadge = (status: string) => {
   gap: 12px;
   padding: 8px 14px;
   margin-bottom: 12px;
-  background: #f0fdf4;
-  border-radius: 10px;
-  border: 1px solid #d1fae5;
+  background: var(--scdc-bg-elevated);
+  border-radius: var(--scdc-radius-md);
+  border: 1px solid var(--scdc-bg-sunken);
 }
 
 .stage-stat-item {
@@ -836,17 +1058,19 @@ const getStatusBadge = (status: string) => {
 }
 
 .stat-label {
-  color: #4a5568;
+  color: var(--scdc-ink);
   font-weight: 500;
 }
 
 .stat-count {
-  color: #2d3748;
+  color: var(--scdc-accent-hover);
   font-weight: 700;
-  background: #e6ffed;
+  background: var(--scdc-accent-soft);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--scdc-radius-md);
   font-size: 12px;
+  font-family: var(--scdc-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .degraded-warning {
@@ -856,15 +1080,15 @@ const getStatusBadge = (status: string) => {
 .partial-stats {
   padding: 14px 16px;
   margin-bottom: 12px;
-  background: #fff7ed;
-  border-radius: 10px;
-  border: 1px solid #fed7aa;
+  background: var(--scdc-warning-soft);
+  border-radius: var(--scdc-radius-md);
+  border: 1px solid var(--scdc-bg-sunken);
 }
 
 .partial-stats-title {
   font-size: 14px;
   font-weight: 600;
-  color: #c2410c;
+  color: var(--scdc-accent-hover);
   margin-bottom: 10px;
 }
 
@@ -874,7 +1098,7 @@ const getStatusBadge = (status: string) => {
   gap: 6px;
   padding: 5px 0;
   font-size: 13px;
-  color: #7c2d12;
+  color: var(--scdc-ink);
 }
 
 .partial-stat-icon {
@@ -889,7 +1113,7 @@ const getStatusBadge = (status: string) => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #409eff;
+  background: var(--scdc-accent);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -898,26 +1122,30 @@ const getStatusBadge = (status: string) => {
   50% { opacity: 0.5; transform: scale(1.2); }
 }
 
+/* ===== Typing dots ===== */
 .typing-row {
   display: flex;
-  padding: 0 16px 0 52px;
+  padding: 0 20px 0 52px;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .typing-dots {
   display: flex;
   gap: 4px;
-  padding: 8px 14px;
-  background: #f7f8fa;
-  border-radius: 14px;
-  border-bottom-left-radius: 4px;
-  border: 1px solid #e2e8f0;
+  padding: 10px 16px;
+  background: var(--scdc-bg-surface);
+  border-radius: 16px 16px 16px 4px;
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .typing-dots span {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #a0aec0;
+  background: var(--scdc-ink-soft);
   animation: dot-bounce 1.4s ease-in-out infinite;
 }
 
@@ -929,6 +1157,7 @@ const getStatusBadge = (status: string) => {
   40% { transform: scale(1); opacity: 1; }
 }
 
+/* ===== Report body ===== */
 .report-body {
   max-width: 100% !important;
 }
@@ -936,37 +1165,40 @@ const getStatusBadge = (status: string) => {
 .report-body :deep(h1) {
   font-size: 20px;
   font-weight: 700;
-  color: #1a202c;
+  color: var(--scdc-ink-strong);
+  font-family: var(--scdc-font-display);
   margin: 0 0 12px;
   padding-bottom: 8px;
-  border-bottom: 2px solid #e2e8f0;
+  border-bottom: 2px solid var(--scdc-bg-sunken);
 }
 
 .report-body :deep(h2) {
   font-size: 17px;
   font-weight: 700;
-  color: #2d3748;
+  color: var(--scdc-ink-strong);
+  font-family: var(--scdc-font-display);
   margin: 20px 0 10px;
 }
 
 .report-body :deep(h3) {
   font-size: 15px;
   font-weight: 600;
-  color: #4a5568;
+  color: var(--scdc-ink-strong);
+  font-family: var(--scdc-font-display);
   margin: 16px 0 8px;
 }
 
 .report-body :deep(p) {
   margin: 6px 0;
-  line-height: 1.7;
+  line-height: 1.75;
 }
 
 .report-body :deep(blockquote) {
   margin: 10px 0;
   padding: 8px 16px;
-  background: #f0f4ff;
-  border-left: 3px solid #409eff;
-  color: #4a5568;
+  background: var(--scdc-accent-soft);
+  border-left: 3px solid var(--scdc-accent);
+  color: var(--scdc-ink-muted);
   border-radius: 0 6px 6px 0;
 }
 
@@ -981,7 +1213,7 @@ const getStatusBadge = (status: string) => {
 }
 
 .report-body :deep(a) {
-  color: #409eff;
+  color: var(--scdc-accent);
   text-decoration: none;
 }
 
@@ -990,16 +1222,17 @@ const getStatusBadge = (status: string) => {
 }
 
 .report-body :deep(code) {
-  background: #edf2f7;
+  background: var(--scdc-bg-elevated);
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  color: #e53e3e;
+  color: var(--scdc-danger);
+  font-family: var(--scdc-font-mono);
 }
 
 .report-body :deep(hr) {
   border: none;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--scdc-bg-sunken);
   margin: 16px 0;
 }
 
@@ -1008,7 +1241,7 @@ const getStatusBadge = (status: string) => {
   height: auto;
   border-radius: 8px;
   margin: 12px 0;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .report-body :deep(table) {
@@ -1020,15 +1253,16 @@ const getStatusBadge = (status: string) => {
 
 .report-body :deep(th), .report-body :deep(td) {
   padding: 8px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--scdc-bg-sunken);
   text-align: left;
 }
 
 .report-body :deep(th) {
-  background: #f7f8fa;
+  background: var(--scdc-bg-elevated);
   font-weight: 600;
 }
 
+/* ===== Charts ===== */
 .charts-section {
   margin-top: 16px;
 }
@@ -1039,6 +1273,7 @@ const getStatusBadge = (status: string) => {
   margin-bottom: 12px;
 }
 
+/* ===== Message actions ===== */
 .message-actions {
   display: flex;
   gap: 8px;
@@ -1046,149 +1281,181 @@ const getStatusBadge = (status: string) => {
   padding-left: 4px;
 }
 
+/* ===== Input bar ===== */
 .chat-input-bar {
   display: flex;
   gap: 12px;
-  padding: 16px 0;
-  border-top: 1px solid #e2e8f0;
-  background: white;
+  padding: 16px 20px;
+  border-top: 1px solid var(--scdc-bg-sunken);
+  background: var(--scdc-bg-surface);
+  align-items: center;
 }
 
 .topic-input {
   flex: 1;
 }
 
-.history-sidebar {
-  width: 320px;
-  background: white;
-  border-left: 1px solid #e2e8f0;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.05);
+.topic-input :deep(.el-input__wrapper) {
+  border-radius: 24px;
+  box-shadow: 0 0 0 1px var(--scdc-bg-sunken);
+  transition: box-shadow 0.2s ease;
 }
 
-.history-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px;
-  border-bottom: 1px solid #e2e8f0;
+.topic-input :deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px var(--scdc-ink-soft);
 }
 
-.history-header h3 {
-  margin: 0;
-  font-size: 16px;
+.topic-input :deep(.el-input__wrapper.is-focus),
+.topic-input :deep(.el-input__wrapper:focus-within) {
+  box-shadow: 0 0 0 2px var(--scdc-accent-soft);
+}
+
+.send-btn {
+  border-radius: 24px;
+  padding: 0 24px;
   font-weight: 600;
-  color: #2d3748;
+  height: 42px;
 }
 
-.history-actions {
+.stop-btn {
+  border-radius: 24px;
+  padding: 0 24px;
+  font-weight: 600;
+  height: 42px;
+  animation: stopPulse 2s ease-in-out infinite;
+}
+
+@keyframes stopPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 108, 108, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(245, 108, 108, 0); }
+}
+
+/* ===== Custom scrollbar ===== */
+.chat-messages::-webkit-scrollbar,
+.history-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-track,
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-messages::-webkit-scrollbar-thumb,
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--scdc-bg-sunken);
+  border-radius: 3px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover,
+.history-list::-webkit-scrollbar-thumb:hover {
+  background: var(--scdc-ink-soft);
+}
+
+/* ===== Auth placeholder ===== */
+.auth-placeholder {
+  min-height: 60vh;
   display: flex;
-  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
 }
-
-.history-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-.history-empty {
-  padding: 40px 16px;
+.placeholder-inner {
   text-align: center;
-  color: #a0aec0;
+  max-width: 420px;
 }
-
-.history-item {
+.placeholder-icon {
+  font-family: var(--scdc-font-display);
+  font-size: 36px;
+  font-weight: 600;
+  color: var(--scdc-accent);
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 24px;
   display: flex;
   align-items: center;
-  padding: 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.2s;
-  margin-bottom: 4px;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--scdc-accent-soft);
+  letter-spacing: -0.02em;
 }
-
-.history-item:hover {
-  background: #f7f8fa;
+.placeholder-title {
+  font-family: var(--scdc-font-display);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+  margin: 0 0 12px 0;
+  letter-spacing: -0.01em;
 }
-
-.history-item.active {
-  background: #e6f0ff;
-  border: 1px solid #409eff;
+.placeholder-desc {
+  font-family: var(--scdc-font-body);
+  font-size: 15px;
+  color: var(--scdc-ink-muted);
+  margin: 0 0 24px 0;
+  line-height: 1.7;
 }
-
-.history-item-content {
-  flex: 1;
-  min-width: 0;
-}
-
-.history-item-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: #2d3748;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 4px;
-}
-
-.history-item-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.placeholder-brand {
+  font-family: var(--scdc-font-body);
   font-size: 12px;
+  color: var(--scdc-ink-soft);
+  letter-spacing: 0.18em;
+  margin: 32px 0 0 0;
+  text-transform: none;
 }
 
-.status-badge {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-}
+/* ===== Mobile responsive ===== */
+@media (max-width: 768px) {
+  .workflow-layout {
+    position: relative;
+  }
 
-.status-running {
-  background: #fff3e0;
-  color: #f57c00;
-}
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 200;
+    transform: translateX(-100%);
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.1);
+  }
 
-.status-completed {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
+  .sidebar.sidebar-open {
+    transform: translateX(0);
+  }
 
-.status-failed {
-  background: #ffebee;
-  color: #c62828;
-}
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 150;
+    animation: fadeIn 0.2s ease;
+  }
 
-.status-idle {
-  background: #f5f5f5;
-  color: #757575;
-}
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
 
-.history-item-time {
-  color: #a0aec0;
-}
+  .hamburger-btn {
+    display: flex;
+  }
 
-.history-item-delete {
-  opacity: 0;
-  transition: opacity 0.2s;
-  color: #e53e3e;
-}
+  .chat-header {
+    padding: 10px 16px;
+  }
 
-.history-item:hover .history-item-delete {
-  opacity: 1;
-}
+  .chat-messages {
+    padding: 16px 0;
+    gap: 16px;
+  }
 
-.slide-enter-active,
-.slide-leave-active {
-  transition: all 0.3s ease;
-}
+  .message-row {
+    padding: 0 12px;
+  }
 
-.slide-enter-from,
-.slide-leave-to {
-  transform: translateX(100%);
-  opacity: 0;
+  .chat-input-bar {
+    padding: 12px 12px;
+  }
 }
 </style>

@@ -1,0 +1,161 @@
+# 基础设施 Docker Compose 配置
+#
+# 仅运行开发所需的基础设施服务（数据库、缓存、搜索引擎等）
+# 前后端代码在本地启动，支持热重载
+#
+# 使用方法：
+#   docker compose -f docker-compose.infra.yml up -d
+#   本地启动后端：cd backend && uvicorn app.main:app --reload --port 8000
+#   本地启动前端：cd frontend && npm run dev
+
+version: "3.8"
+
+# 自定义网络
+networks:
+  scdc_net:
+    driver: bridge
+
+# 持久化数据卷
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  opensearch_data:
+  milvus_data:
+  etcd_data:
+  minio_milvus_data:
+
+services:
+  # ===== 数据库层 =====
+  
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: scdc_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-scdc_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - scdc_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-scdc_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: scdc_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - scdc_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===== 对象存储 =====
+  
+  # MinIO
+  minio:
+    image: minio/minio:latest
+    container_name: scdc_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
+  # ===== 搜索与向量数据库 =====
+  
+  # OpenSearch
+  opensearch:
+    image: opensearchproject/opensearch:latest
+    container_name: scdc_opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "StrongPassword123!"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
+  # etcd (Milvus 依赖)
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: scdc_etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
+  # MinIO (Milvus 依赖)
+  minio_milvus:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: scdc_minio_milvus
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_milvus_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - scdc_net
+    restart: unless-stopped
+
+  # Milvus
+  milvus:
+    image: milvusdb/milvus:v2.4.0
+    container_name: scdc_milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: "/var/lib/milvus/etcd"
+      COMMON_STORAGETYPE: "local"
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - scdc_net
+    restart: unless-stopped

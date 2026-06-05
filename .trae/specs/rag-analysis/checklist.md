@@ -1,0 +1,3 @@
+- [x] 分析并确认当前 RAG 链路：AnalyzerAgent 中已使用向量检索（Milvus search + rerank）
+- [x] 确认向量库写入：工作流报告生成后自动切块写入 Milvus
+- [x] 确认 DirectResponseService 不使用 RAG 的设计意图：一般问答为通用知识，无需 RAG

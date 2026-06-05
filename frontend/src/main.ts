@@ -22,11 +22,30 @@ import 'element-plus/dist/index.css';
 import './styles/variables.css';
 import App from './App.vue';
 import router from './router';
+import i18n from './i18n';
+import { usePreferencesStore } from './stores/preferences';
+import { useAuthStore } from './stores/auth';
 
 const app = createApp(App);
 
 app.use(createPinia());
 app.use(router);
 app.use(ElementPlus);
+app.use(i18n);
+
+// 应用挂载前初始化用户偏好（语言 / 主题），避免首屏闪回 fallback
+const preferencesStore = usePreferencesStore();
+preferencesStore.init();
+
+// 应用初始化时验证本地存储的token是否有效
+// 只在localStorage中存在token时才调用，避免不必要的请求
+if (localStorage.getItem('token')) {
+  const authStore = useAuthStore();
+  // 异步验证，不阻断应用启动
+  authStore.fetchCurrentUser().catch(() => {
+    // fetchCurrentUser 内部已处理失败情况（清除无效token）
+    // 这里静默捕获，避免未处理的 Promise rejection
+  });
+}
 
 app.mount('#app');

@@ -28,6 +28,13 @@ from app.services.vectorstore import VectorStoreService
 from app.services.embedding import EmbeddingService
 from app.core.db import async_session_factory, migrate_task_id_column, drop_templates_table, engine
 from app.models.base import Base
+from app.core.security import get_password_hash
+
+# Import all models so that Base.metadata knows about all tables
+from app.models.user import User, UserRole  # noqa: F401
+from app.models.report import Report  # noqa: F401
+from app.models.task import Task, TaskRun  # noqa: F401
+from app.models.workflow_run import WorkflowRun  # noqa: F401
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,9 +49,40 @@ async def lifespan(app: FastAPI):
     - 启动阶段：执行数据库迁移，启动 Cron 定时任务调度循环，每分钟扫描一次待执行任务
     - 关闭阶段：优雅停止调度循环，避免任务中断
     """
+    logger.info("Creating database tables if not exists...")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.warning("Failed to create database tables: %s", e)
+
     logger.info("Running database migrations...")
     await migrate_task_id_column()
     await drop_templates_table()
+
+    # 创建默认 admin 用户（如果不存在）
+    logger.info("Seeding admin user if not exists...")
+    try:
+        from sqlalchemy import select
+        async with async_session_factory() as session:
+            result = await session.execute(select(User).where(User.username == "admin"))
+            existing_admin = result.scalars().first()
+            if not existing_admin:
+                admin_user = User(
+                    username="admin",
+                    email="admin@scdc.local",
+                    password_hash=get_password_hash("password"),
+                    role=UserRole.admin,
+                    status="active",
+                )
+                session.add(admin_user)
+                await session.commit()
+                logger.info("Admin user created: admin / password")
+            else:
+                logger.info("Admin user already exists")
+    except Exception as e:
+        logger.warning("Failed to seed admin user: %s", e)
     logger.info("Initializing AI model configs table...")
     try:
         from sqlalchemy import text
@@ -141,6 +179,7 @@ app = FastAPI(
     description="Market Insight AI Agent API",
     version="1.0.0",
     lifespan=lifespan,
+    redirect_slashes=False,  # 关闭自动斜杠重定向，避免重定向丢失 Authorization 头
 )
 
 # 集成 prometheus_fastapi_instrumentator，自动采集请求量、延迟等指标

@@ -98,15 +98,27 @@ class ReportService:
 
     async def list_reports(
         self, session: AsyncSession, task_id: Optional[str] = None, q: Optional[str] = None, skip: int = 0, limit: int = 20
-    ) -> List[Report]:
-        stmt = select(Report).order_by(Report.id.desc())
+    ) -> Tuple[List[Report], int]:
+        """获取报告列表（分页），并返回符合条件的总记录数。
+
+        返回:
+            (报告列表, 总数)
+        """
+        base_stmt = select(Report)
         if task_id is not None:
-            stmt = stmt.where(Report.task_id == task_id)
+            base_stmt = base_stmt.where(Report.task_id == task_id)
         if q:
-            stmt = stmt.where(or_(Report.title.ilike(f"%{q}%"), Report.summary.ilike(f"%{q}%")))
-        stmt = stmt.offset(skip).limit(limit)
+            base_stmt = base_stmt.where(or_(Report.title.ilike(f"%{q}%"), Report.summary.ilike(f"%{q}%")))
+
+        # 统计总数（应用相同的过滤条件）
+        count_stmt = select(func.count()).select_from(base_stmt.subquery())
+        total_res = await session.execute(count_stmt)
+        total = int(total_res.scalar() or 0)
+
+        # 按创建时间倒序、ID 倒序排序，确保最新报告优先且顺序稳定
+        stmt = base_stmt.order_by(Report.created_at.desc(), Report.id.desc()).offset(skip).limit(limit)
         res = await session.execute(stmt)
-        return res.scalars().all()
+        return list(res.scalars().all()), total
 
     async def update_report(self, session: AsyncSession, report_id: int, up: ReportUpdate) -> Optional[Report]:
         r = await self.get_report(session, report_id)

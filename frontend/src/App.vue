@@ -7,8 +7,5 @@ import { RouterView } from 'vue-router';
 </template>
 
 <style>
-body {
-  margin: 0;
-  font-family: var(--scdc-font-family);
-}
+/* App.vue 全局样式由 variables.css 提供 */
 </style>

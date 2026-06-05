@@ -14,10 +14,24 @@
 
 from datetime import datetime, timedelta
 from typing import Any, Union
+import bcrypt
 from passlib.context import CryptContext
 import jwt
 from cryptography.fernet import Fernet
 from app.core.config import settings
+
+# ---- passlib 1.7.4 + bcrypt 4.x 兼容性 workaround ----
+# passlib 在 _load_backend_mixin 中通过 bcrypt.__about__.__version__ 读取版本号，
+# 但 bcrypt 4.x 已删除 __about__ 顶层属性（改用 bcrypt.__version__）。
+# 如果不补齐，passlib 会在每次 CryptContext 初始化时打印一条 WARNING + 完整 traceback，
+# 虽然 passlib 内部捕获了异常（"trapped" 标识）不影响功能，但会严重污染日志。
+# 这里动态挂载一个轻量 __about__ 替身，仅在缺失时生效。
+if not hasattr(bcrypt, "__about__"):
+    class _BcryptAboutShim:
+        __version__ = bcrypt.__version__
+
+    bcrypt.__about__ = _BcryptAboutShim
+# ---- 兼容性 workaround 结束 ----
 
 # 密码哈希上下文：使用 bcrypt，自动标记旧算法为"弃用"以便渐进式迁移
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

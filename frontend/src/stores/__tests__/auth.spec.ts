@@ -35,7 +35,7 @@ describe('Auth Store', () => {
 
   it('performs login correctly and sets token', async () => {
     const store = useAuthStore();
-    await store.login({ username: 'admin', password: 'pwd' });
+    await store.login('admin', 'pwd');
     expect(store.token).toBe('fake-jwt-token');
     expect(store.isAuthenticated).toBe(true);
     expect(store.user).toEqual({ id: 1, username: 'admin', role: 'admin' });
@@ -44,7 +44,7 @@ describe('Auth Store', () => {
 
   it('performs logout and clears state', async () => {
     const store = useAuthStore();
-    await store.login({ username: 'admin', password: 'pwd' });
+    await store.login('admin', 'pwd');
     expect(store.isAuthenticated).toBe(true);
 
     // mock window.location

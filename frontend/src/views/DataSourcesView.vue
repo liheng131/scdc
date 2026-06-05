@@ -364,7 +364,7 @@ onMounted(() => {
         <el-table-column prop="url" label="URL" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
             <a v-if="row.url" :href="row.url" target="_blank" class="record-link">{{ row.url }}</a>
-            <span v-else style="color: #999;">--</span>
+            <span v-else class="muted-text">--</span>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="采集时间" width="170">
@@ -390,7 +390,7 @@ onMounted(() => {
         </el-table-column>
       </el-table>
 
-      <div v-if="!recordsLoading && records.length === 0" style="text-align: center; padding: 40px; color: #999;">
+      <div v-if="!recordsLoading && records.length === 0" class="records-empty">
         暂无采集记录，请点击「手动抓取」按钮获取资讯
       </div>
 
@@ -451,9 +451,9 @@ onMounted(() => {
 }
 
 .table-card {
-  border-radius: 12px;
-  border: none;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  border-radius: var(--scdc-radius-lg);
+  border: 1px solid var(--scdc-bg-sunken);
+  box-shadow: var(--scdc-shadow-soft);
 }
 
 .card-header {
@@ -463,9 +463,10 @@ onMounted(() => {
 }
 
 .card-title {
+  font-family: var(--scdc-font-display);
   font-weight: 600;
   font-size: 18px;
-  color: #1e222d;
+  color: var(--scdc-ink-strong);
 }
 
 .actions {
@@ -479,7 +480,7 @@ onMounted(() => {
 }
 
 .record-link {
-  color: #409eff;
+  color: var(--scdc-accent);
   text-decoration: none;
   font-size: 13px;
 }
@@ -489,11 +490,21 @@ onMounted(() => {
 
 .content-view {
   white-space: pre-wrap;
-  line-height: 1.8;
+  line-height: 1.75;
   max-height: 400px;
   overflow-y: auto;
-  color: #303133;
-  font-size: 14px;
+  color: var(--scdc-ink);
+  font-size: 15px;
   padding: 8px 0;
+}
+
+.muted-text {
+  color: var(--scdc-ink-soft);
+}
+
+.records-empty {
+  text-align: center;
+  padding: 40px;
+  color: var(--scdc-ink-soft);
 }
 </style>

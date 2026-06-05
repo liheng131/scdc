@@ -1,5 +1,4 @@
 import pytest
-from app.core.config import settings
 from app.agents.collector import CollectorAgent
 from app.agents.cleaner import CleanerAgent
 from app.agents.analyzer import AnalyzerAgent
@@ -9,9 +8,7 @@ from app.schemas.agent import CollectorInput, CleanerInput, AnalyzerInput, Repor
 
 @pytest.mark.asyncio
 async def test_full_pipeline():
-    if not settings.serpapi_key:
-        pytest.skip("No SerpAPI key configured")
-
+    # DDGS 始终可用，无需 skip 条件
     task_id = "e2e-test-001"
     topic = "2025年AI芯片市场趋势"
 

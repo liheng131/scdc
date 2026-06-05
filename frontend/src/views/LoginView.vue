@@ -35,10 +35,12 @@ const handleLogin = async () => {
   }
   loading.value = true;
   try {
-    await authStore.login(loginForm);
+    await authStore.login(loginForm.username, loginForm.password);
     ElMessage.success('登录成功，正在进入系统...');
     router.push('/');
   } catch (e: any) {
+    // 错误已在 apiClient 拦截器中通过 ElMessage 展示，此处无需重复提示
+    console.error('Login failed:', e);
   } finally {
     loading.value = false;
   }
@@ -95,55 +97,71 @@ const handleLogin = async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1e222d 0%, #0f1319 100%);
+  background: var(--scdc-bg-canvas);
+  position: relative;
+  overflow: hidden;
+}
+
+.login-container::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at top right, rgba(180, 83, 9, 0.06), transparent 60%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .login-box {
+  position: relative;
+  z-index: 1;
   width: 420px;
-  padding: 48px 40px;
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 16px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+  padding: 56px 48px;
+  background: var(--scdc-bg-surface);
+  border: 1px solid var(--scdc-bg-sunken);
+  border-radius: var(--scdc-radius-lg);
+  box-shadow: var(--scdc-shadow-lift);
 }
 
 .login-header {
   text-align: center;
-  margin-bottom: 36px;
+  margin-bottom: var(--scdc-space-8);
 }
 
 .title {
-  font-size: 28px;
-  font-weight: 700;
-  color: #ffffff;
+  font-family: var(--scdc-font-display);
+  color: var(--scdc-accent);
+  font-weight: 600;
+  font-size: 30px;
+  letter-spacing: -0.01em;
   margin: 0 0 10px 0;
-  background: linear-gradient(135deg, #409eff, #67c23a);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
 }
 
 .subtitle {
   font-size: 14px;
-  color: #a0aec0;
+  color: var(--scdc-ink-muted);
   margin: 0;
+  font-family: var(--scdc-font-body);
+  line-height: var(--scdc-leading-snug);
 }
 
 .login-form {
-  margin-bottom: 24px;
+  margin-bottom: var(--scdc-space-6);
 }
 
 .login-btn {
   width: 100%;
-  margin-top: 12px;
-  border-radius: 8px;
+  margin-top: var(--scdc-space-3);
+  border-radius: var(--scdc-radius-md);
+  height: 44px;
+  font-family: var(--scdc-font-body);
   font-weight: 600;
-  letter-spacing: 1px;
+  letter-spacing: 0.05em;
 }
 
 .login-footer {
   text-align: center;
-  font-size: 12px;
-  color: #718096;
+  font-size: var(--scdc-text-xs);
+  color: var(--scdc-ink-soft);
+  font-family: var(--scdc-font-body);
 }
 </style>

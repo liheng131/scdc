@@ -7,9 +7,13 @@ API 路由聚合模块
 - 内置健康检查端点（/api/v1/health），用于负载均衡探测和运行状态监控
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.api.responses import success_response, ResponseModel
 from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, workflow, settings, metrics
+from app.services.ddgs import DDGSService, ddgs_health, DEFAULT_BACKEND
+from app.schemas.search import SearchRequest
+from app.api.deps import get_current_active_user
+from app.models.user import User
 
 # 顶层路由实例，所有业务模块的子路由都注册到此处
 api_router = APIRouter()
@@ -33,6 +37,9 @@ api_router.include_router(workflow.router, prefix="/workflow", tags=["workflow"]
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_router.include_router(metrics.router, prefix="/metrics-json", tags=["metrics"])
 
+# 共享一个 DDGSService 实例给健康检查用
+_ddgs_probe = DDGSService()
+
 @api_router.get("/health", response_model=ResponseModel)
 async def health_check():
     """
@@ -45,3 +52,30 @@ async def health_check():
     """
     from app.core.config import settings
     return success_response(data={"version": "1.0.0", "environment": settings.app_env})
+
+
+@api_router.get("/health/ddgs", response_model=ResponseModel)
+async def ddgs_health_check(
+    current_user: User = Depends(get_current_active_user),
+) -> dict:
+    """
+    DDGS 搜索服务健康检查端点（路径：/api/v1/health/ddgs）
+
+    主动执行一次轻量搜索（query="ping", max_results=1）探测 DDGS 可用性，
+    返回最近一次搜索的状态、最近错误、引擎配置等诊断信息。
+    """
+    probe = await _ddgs_probe.search(SearchRequest(query="ping", timeout=5))
+
+    payload = {
+        "status": "ok" if probe.success else "degraded",
+        "engine": DEFAULT_BACKEND,
+        "last_check_at": ddgs_health.last_check_at,
+        "last_error": ddgs_health.last_error,
+        "consecutive_failures": ddgs_health._consecutive_failures,
+        "probe": {
+            "success": probe.success,
+            "result_count": probe.total_results,
+            "error": probe.error,
+        },
+    }
+    return success_response(data=payload)

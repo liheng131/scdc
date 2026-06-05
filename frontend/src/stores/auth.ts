@@ -32,8 +32,10 @@ export const useAuthStore = defineStore('auth', () => {
   );
   const isAuthenticated = ref<boolean>(!!token.value);
 
-  const login = async (credentials: Record<string, string>) => {
-    const data = await authApi.login(credentials);
+  const login = async (identifier: string, password: string) => {
+    // 后端 OAuth2PasswordRequestForm 仍以 `username` 字段接收，
+    // 因此把 identifier（用户名或邮箱）映射为 username 提交以保持兼容。
+    const data = await authApi.login({ username: identifier, password });
     if (data.data && data.data.access_token) {
       token.value = data.data.access_token;
       user.value = data.data.user;
@@ -49,9 +51,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAuthenticated.value = false;
     localStorage.removeItem('token');
     localStorage.removeItem('user');
-    if (window.location.pathname !== '/login') {
-      window.location.href = '/login';
-    }
+    // 不再跳转，由调用方决定下一步
   };
 
   const fetchCurrentUser = async () => {

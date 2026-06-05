@@ -33,7 +33,7 @@ export interface ReportStatisticsResponse {
 }
 
 export const reportsApi = {
-  getReports: async (params?: { task_id?: string; q?: string; skip?: number; limit?: number }): Promise<ApiResponse<ReportInfo[]>> => {
+  getReports: async (params?: { task_id?: string; q?: string; skip?: number; limit?: number }): Promise<ApiResponse<{ items: ReportInfo[]; total: number }>> => {
     const res = await apiClient.get('/api/v1/reports', { params });
     return res.data;
   },

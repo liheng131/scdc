@@ -26,7 +26,7 @@ class CreateFromWorkflowRequest(BaseModel):
     content_markdown: Optional[str] = None
     summary: Optional[str] = None
 
-@router.post("", response_model=ResponseModel)
+@router.post("/", response_model=ResponseModel)
 async def create_report(
     rep: ReportCreate,
     current_user: User = Depends(get_current_active_user),
@@ -36,7 +36,7 @@ async def create_report(
     obj = await rep_service.create_report(session, rep)
     return success_response(data=ReportOut.model_validate(obj).model_dump())
 
-@router.get("", response_model=ResponseModel)
+@router.get("/", response_model=ResponseModel)
 async def list_reports(
     task_id: Optional[str] = None,    # 按任务 ID 筛选
     q: Optional[str] = None,           # 关键词搜索（匹配标题和摘要）
@@ -46,8 +46,11 @@ async def list_reports(
     session: AsyncSession = Depends(get_db)
 ) -> Any:
     """获取报告列表，支持按任务 ID 和关键词筛选"""
-    lst = await rep_service.list_reports(session, task_id=task_id, q=q, skip=skip, limit=limit)
-    return success_response(data=[ReportOut.model_validate(x).model_dump() for x in lst])
+    items, total = await rep_service.list_reports(session, task_id=task_id, q=q, skip=skip, limit=limit)
+    return success_response(data={
+        "items": [ReportOut.model_validate(x).model_dump() for x in items],
+        "total": total,
+    })
 
 @router.get("/statistics", response_model=ResponseModel[ReportStatisticsResponse])
 async def get_report_statistics(

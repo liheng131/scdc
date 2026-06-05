@@ -1,0 +1,6 @@
+- [x] Checkpoint 1: axios拦截器的401处理显示明确的用户提示，而不是静默登出
+- [x] Checkpoint 2: 应用初始化时只在localStorage存在token时才调用fetchCurrentUser()
+- [x] Checkpoint 3: fetchCurrentUser()失败时清除无效token但不阻断应用启动
+- [x] Checkpoint 4: HomeView中各个API调用有独立的错误处理，不会因单个失败导致用户被登出
+- [x] Checkpoint 5: metricsApi.getMetrics()接口不需要认证即可访问
+- [x] Checkpoint 6: 用户登录并导航到其他页面后，返回仪表盘时不会被自动登出
