@@ -61,23 +61,95 @@ class DirectResponseService:
     def _sse(self, event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
+    def _get_system_prompt(self) -> str:
+        return SYSTEM_PROMPT
+
+    async def _retrieve_rag_context(self, query: str) -> str:
+        """检索向量库获取相关历史报告片段。
+
+        Returns: 格式化的上下文字符串，失败时返回空字符串。
+        """
+        if not query:
+            return ""
+        try:
+            from app.services.vectorstore import VectorStoreService
+            from app.services.rerank import RerankService
+            from app.services.embedding import EmbeddingService
+
+            emb_service = EmbeddingService()
+            embeddings = await emb_service.embed_texts_or_empty([query])
+            if not embeddings or not embeddings[0]:
+                logger.info("RAG: embedding returned empty, skipping")
+                return ""
+
+            vs_service = VectorStoreService()
+            if not vs_service._connected:
+                logger.info("RAG: Milvus not connected, skipping")
+                return ""
+            if not vs_service.collection_exists():
+                logger.info("RAG: collection does not exist, skipping")
+                return ""
+            hits = vs_service.search(embeddings[0], top_k=20)
+            if not hits:
+                logger.info("RAG: no vector hits for query")
+                return ""
+
+            documents = [hit.get("text", "") for hit in hits]
+            rerank_service = RerankService()
+            reranked = await rerank_service.rerank(query, documents)
+            top_indices = [r["index"] for r in reranked[:3] if r.get("index") is not None]
+            context_snippets = [documents[i] for i in top_indices if 0 <= i < len(documents)]
+
+            if not context_snippets:
+                return ""
+
+            context_text = "\n\n---\n\n".join(context_snippets)
+            logger.info(
+                "RAG: retrieved %d hits, reranked to %d context snippets",
+                len(hits), len(context_snippets),
+            )
+            return context_text
+        except Exception as e:
+            logger.warning("RAG retrieval failed: %s, falling back to no-RAG mode", e)
+            return ""
+
     async def generate_response_stream(
-        self, message: str, conversation_history: list = None, workflow_id: str = None
+        self,
+        message: str,
+        conversation_history: list = None,
+        workflow_id: str = None,
+        use_rag: bool = False,
     ) -> AsyncGenerator[str, None]:
         await self._ensure_db_config()
-        logger.info(f"DirectResponseService generating response for: '{message[:100]}...'")
+        logger.info(
+            f"DirectResponseService generating response for: '{message[:100]}...' (use_rag={use_rag})"
+        )
 
         if not self.llm_base_url:
             logger.warning("LLM base URL not configured for direct response")
             yield self._sse("error", {"error": "LLM服务未配置，请先配置AI模型"})
             return
 
+        system_prompt = self._get_system_prompt()
+        if use_rag:
+            rag_context = await self._retrieve_rag_context(message)
+            if rag_context:
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    f"以下是从历史报告中检索到的相关内容片段（仅供参考）：\n\n{rag_context}\n\n"
+                    f"如果用户问题与上述片段相关，请引用；否则按自己的知识回答。"
+                )
+
         try:
             if self.llm_provider == "gpustack":
-                async for chunk in self._stream_gpustack(message, conversation_history, workflow_id):
+                async for chunk in self._stream_gpustack(
+                    message, conversation_history, workflow_id, system_prompt=system_prompt
+                ):
                     yield chunk
             else:
-                async for chunk in self._stream_ollama(message, conversation_history, workflow_id):
+                async for chunk in self._stream_ollama(
+                    message, conversation_history, workflow_id, system_prompt=system_prompt
+                ):
                     yield chunk
         except httpx.ConnectError as e:
             logger.error(f"DirectResponseService LLM connect failed: {e}")
@@ -90,9 +162,14 @@ class DirectResponseService:
             yield self._sse("error", {"error": f"生成回复时出错: {str(e)[:500]}"})
 
     async def _stream_gpustack(
-        self, message: str, conversation_history: list = None, workflow_id: str = None
+        self,
+        message: str,
+        conversation_history: list = None,
+        workflow_id: str = None,
+        system_prompt: str = None,
     ) -> AsyncGenerator[str, None]:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        effective_system_prompt = system_prompt if system_prompt else SYSTEM_PROMPT
+        messages = [{"role": "system", "content": effective_system_prompt}]
 
         if conversation_history:
             for msg in conversation_history:
@@ -144,9 +221,14 @@ class DirectResponseService:
         yield self._sse("direct_response_done", {"workflow_id": workflow_id})
 
     async def _stream_ollama(
-        self, message: str, conversation_history: list = None, workflow_id: str = None
+        self,
+        message: str,
+        conversation_history: list = None,
+        workflow_id: str = None,
+        system_prompt: str = None,
     ) -> AsyncGenerator[str, None]:
-        prompt_parts = [SYSTEM_PROMPT, ""]
+        effective_system_prompt = system_prompt if system_prompt else SYSTEM_PROMPT
+        prompt_parts = [effective_system_prompt, ""]
         if conversation_history:
             for msg in conversation_history:
                 role = msg.get("role", "user")

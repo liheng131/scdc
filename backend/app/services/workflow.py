@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from app.core.db import async_session_factory
 from app.models.workflow_run import WorkflowRun
 from app.agents.orchestrator import OrchestratorAgent
+from app.agents.master_agent import MasterAgent
 from app.schemas.agent import OrchestratorInput
 from app.services.intent_classifier import IntentClassifier
 from app.services.direct_response import DirectResponseService
@@ -39,7 +40,7 @@ STAGE_ICONS = {
 }
 
 class WorkflowState:
-    def __init__(self, workflow_id: str, topic: str, max_items: int, dimensions: list, conversation_history: list = None):
+    def __init__(self, workflow_id: str, topic: str, max_items: int, dimensions: list, conversation_history: list = None, use_rag: bool = False):
         self.workflow_id = workflow_id
         self.topic = topic
         self.max_items = max_items
@@ -52,25 +53,55 @@ class WorkflowState:
         self.stages: Dict[str, Any] = {}
         self.result: Optional[Dict[str, Any]] = None
         self.is_direct_response: bool = False
+        self.use_rag: bool = use_rag
 
 class WorkflowService:
     def __init__(self):
         self._workflows: Dict[str, WorkflowState] = {}
+        # 保留对 IntentClassifier / DirectResponseService 的直接引用（向后兼容）
         self._intent_classifier = IntentClassifier()
         self._direct_response = DirectResponseService()
+        # 主控 Agent（轻度重构：组合分类器 + 直答服务；OrchestratorAgent 按需实例化）
+        # 旧的 _classify_intent() 仍可用，内部委托 IntentClassifier
+        self.master_agent = MasterAgent(
+            intent_classifier=self._intent_classifier,
+            direct_response=self._direct_response,
+        )
 
     async def _classify_intent(self, message: str, conversation_history: list = None, has_existing_report: bool = False) -> dict:
+        """向后兼容：直接委托 IntentClassifier.classify()
+        等价于 master_agent.classify()"""
         return await self._intent_classifier.classify(message, conversation_history, has_existing_report)
 
-    async def run_direct_response_stream(self, message: str, conversation_history: list = None) -> AsyncGenerator[str, None]:
-        async for chunk in self._direct_response.generate_response_stream(message, conversation_history):
+    async def run_direct_response_stream(self, message: str, conversation_history: list = None, use_rag: bool = False) -> AsyncGenerator[str, None]:
+        async for chunk in self._direct_response.generate_response_stream(
+            message, conversation_history, use_rag=use_rag
+        ):
             yield chunk
 
-    async def create_workflow(self, topic: str, max_items: int, dimensions: list = None, conversation_history: list = None) -> WorkflowState:
+    async def run_follow_up_stream(
+        self,
+        workflow_id: str,
+        message: str,
+        conversation_history: list,
+        use_rag: bool = False,
+    ) -> AsyncGenerator[str, None]:
+        """对已有 workflow 发起追问：直接走直答 SSE 流，透传 use_rag。"""
+        state = await self.get_workflow(workflow_id)
+        if not state:
+            yield self._sse("error", {"error": "Workflow not found"})
+            return
+        history = conversation_history if conversation_history is not None else state.conversation_history
+        async for chunk in self.run_direct_response_stream(
+            message, history, use_rag=use_rag or state.use_rag
+        ):
+            yield chunk
+
+    async def create_workflow(self, topic: str, max_items: int, dimensions: list = None, conversation_history: list = None, use_rag: bool = False) -> WorkflowState:
         wf_id = str(uuid.uuid4())[:8]
         if dimensions is None:
             dimensions = []
-        state = WorkflowState(wf_id, topic, max_items, dimensions, conversation_history)
+        state = WorkflowState(wf_id, topic, max_items, dimensions, conversation_history, use_rag=use_rag)
         self._workflows[wf_id] = state
 
         try:
@@ -136,8 +167,9 @@ class WorkflowService:
         except Exception as e:
             logger.warning("Failed to persist stage update for %s: %s", state.workflow_id, e)
 
-    async def run_workflow_stream(self, state: WorkflowState, start_stage: str = None, reentry_context: str = None) -> AsyncGenerator[str, None]:
+    async def run_workflow_stream(self, state: WorkflowState, start_stage: str = None, reentry_context: str = None, use_rag: bool = False) -> AsyncGenerator[str, None]:
         if state.is_direct_response:
+            effective_use_rag = use_rag or state.use_rag
             state.status = "running"
             state.current_stage = "direct_response"
             await self._persist_stage_update(state)
@@ -146,6 +178,7 @@ class WorkflowService:
                 state.topic,
                 conversation_history=state.conversation_history,
                 workflow_id=state.workflow_id,
+                use_rag=effective_use_rag,
             ):
                 yield chunk
 

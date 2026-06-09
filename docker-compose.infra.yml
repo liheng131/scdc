@@ -24,6 +24,7 @@ volumes:
   milvus_data:
   etcd_data:
   minio_milvus_data:
+  ollama_data:      # Ollama 模型文件持久化
 
 services:
   # ===== 数据库层 =====
@@ -158,4 +159,25 @@ services:
       - milvus_data:/var/lib/milvus
     networks:
       - scdc_net
+    restart: unless-stopped
+
+  # ===== 推理与嵌入服务 =====
+  # Ollama：本地 LLM 推理 + Embedding 服务
+  # 与主 docker-compose.yml 中的 ollama 服务保持一致；供本地基础设施 compose 单独使用
+  ollama:
+    image: ollama/ollama:latest
+    container_name: scdc_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - scdc_net
+    healthcheck:
+      # 镜像里没装 curl/wget/nc，改用 pgrep 进程探测
+      test: ["CMD-SHELL", "pgrep -f 'ollama serve' >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped

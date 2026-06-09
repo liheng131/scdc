@@ -21,18 +21,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
-# Configure Chinese font support
-_font_paths = [
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # WenQuanYi Micro Hei
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",     # WenQuanYi Zen Hei
-]
-for _fp in _font_paths:
-    if os.path.exists(_fp):
-        fm.fontManager.addfont(_fp)
-        matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei']
-        matplotlib.rcParams['axes.unicode_minus'] = False
-        break
-del _font_paths, _fp
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -41,6 +29,64 @@ from app.core.config import settings
 from app.core.runtime_config import rumtime_config
 
 logger = logging.getLogger(__name__)
+
+# Configure Chinese font support
+# 覆盖 Windows / macOS / Linux 三个平台的中文字体路径
+# 报告里的图表在以下任一路径命中即可正确渲染中文，避免方框乱码
+_font_paths = [
+    # Windows
+    r"C:\Windows\Fonts\msyh.ttc",         # 微软雅黑（首选）
+    r"C:\Windows\Fonts\msyhbd.ttc",       # 微软雅黑 Bold
+    r"C:\Windows\Fonts\simhei.ttf",        # 黑体
+    r"C:\Windows\Fonts\simsun.ttc",        # 宋体
+    r"C:\Windows\Fonts\Deng.ttf",          # 等线
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/Library/Fonts/Songti.ttc",
+    # Linux (Docker 容器内)
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+]
+# 候选 sans-serif 名称（matplotlib 按顺序 fallback）
+_sans_candidates = [
+    "Microsoft YaHei",       # 微软雅黑
+    "SimHei",                # 黑体
+    "SimSun",                # 宋体
+    "DengXian",              # 等线
+    "PingFang SC",           # macOS 苹方
+    "STHeiti",               # macOS 华文黑体
+    "Songti SC",             # macOS 宋体
+    "WenQuanYi Micro Hei",   # Linux 文泉驿微米黑
+    "WenQuanYi Zen Hei",     # Linux 文泉驿正黑
+    "Noto Sans CJK SC",      # Noto CJK
+    "Noto Sans CJK",         # Noto CJK 通用名
+    "DejaVu Sans",           # matplotlib 默认（兜底，必有）
+]
+_selected_font = None
+for _fp in _font_paths:
+    if os.path.exists(_fp):
+        try:
+            fm.fontManager.addfont(_fp)
+            _selected_font = _fp
+            logger.info("Registered Chinese font for matplotlib: %s", _fp)
+        except Exception as _e:
+            logger.warning("Failed to register font %s: %s", _fp, _e)
+        break
+if _selected_font:
+    matplotlib.rcParams['font.sans-serif'] = _sans_candidates
+    matplotlib.rcParams['axes.unicode_minus'] = False
+else:
+    logger.warning(
+        "No Chinese font found in known paths. "
+        "Charts may display garbled Chinese text (boxes □). "
+        "Install fonts-wqy-microhei (Linux) or ensure C:\\Windows\\Fonts\\msyh.ttc exists (Windows)."
+    )
+del _font_paths, _fp, _sans_candidates, _selected_font
 
 
 class ReporterAgent:

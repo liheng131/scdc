@@ -145,6 +145,10 @@ async def upload_report(
     try:
         content = await file.read()
         obj = await rep_service.upload_report(session, content, file.filename, title)
+        # lazy 模式：用户在 UI 上传 = 用户主动确认，立即同步触发 Milvus 写入
+        await rep_service.upload_to_vector_store_if_pending(session, obj.id)
+        # 重新读取以拿到更新后的 pending_vector_upload / vector_uploaded_at
+        await session.refresh(obj)
         return success_response(data=ReportOut.model_validate(obj).model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -161,8 +165,13 @@ async def export_report(
 
     不返回 JSON，而是直接返回文件流（Response），
     通过 Content-Disposition 头触发浏览器下载。
+
+    lazy 行为：首次导出时（pending_vector_upload=True）自动同步触发 Milvus 写入，
+    这样"用户导出"作为用户主动确认的信号，触发 RAG 入库。
     """
     try:
+        # 首次导出时自动写入 Milvus
+        await rep_service.upload_to_vector_store_if_pending(session, report_id)
         filename, media_type, content = await rep_service.export_report(session, report_id, fmt)
         return Response(
             content=content,

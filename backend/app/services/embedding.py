@@ -32,6 +32,7 @@ class EmbeddingService:
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         await self._ensure_db_config()
+        # 分发：gpustack 走 OpenAI 兼容端点，其他（含 ollama）走 Ollama 原生端点
         if self.provider == "gpustack":
             return await self._embed_gpustack(texts)
         else:

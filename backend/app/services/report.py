@@ -54,6 +54,13 @@ class ReportService:
         return chunks
 
     async def _embed_and_store(self, report_id: int, content_markdown: str):
+        """DEPRECATED: 旧版自动嵌入入口，由 export_report 触发。
+
+        自"lazy 向量库写入"改造后，写入时机已统一迁移到
+        `VectorstoreUploadService.upload_report()`，并由 export / upload 端点
+        在用户主动确认时触发。本方法保留仅为向后兼容，新逻辑请走
+        `upload_to_vector_store_if_pending()`。
+        """
         try:
             chunks = self._chunk_text(content_markdown)
             if not chunks:
@@ -83,13 +90,39 @@ class ReportService:
             content_markdown=report_in.content_markdown,
             storage_ref=report_in.storage_ref,
             images=report_in.chart_images if report_in.chart_images else [],  # NEW: persist chart_images
+            pending_vector_upload=True,  # NEW: lazy 模式默认待写入
         )
         session.add(r)
         await session.commit()
         await session.refresh(r)
-        if r.content_markdown:
-            asyncio.create_task(self._embed_and_store(r.id, r.content_markdown))
+        # 注意：lazy 模式下不在此处触发 Milvus 写入
         return r
+
+    async def upload_to_vector_store_if_pending(self, session: AsyncSession, report_id: int) -> bool:
+        """如果报告 pending_vector_upload=True，则嵌入 Milvus 并更新状态。
+
+        触发时机：用户首次导出报告（PDF/DOCX/PPTX/MD 任一格式）或用户上传报告。
+        写入成功后将 pending_vector_upload 标记为 False 并记录上传时间。
+
+        Returns:
+            True 表示本次确实写入了 Milvus，False 表示已写入过或写入失败。
+        """
+        from app.services.vectorstore_upload import vs_upload_service
+        import datetime
+
+        r = await self.get_report(session, report_id)
+        if not r:
+            return False
+        if not r.pending_vector_upload:
+            return False
+        chunks = await vs_upload_service.upload_report(r)
+        if chunks > 0:
+            r.pending_vector_upload = False
+            r.vector_uploaded_at = datetime.datetime.utcnow().isoformat()
+            await session.commit()
+            await session.refresh(r)
+            return True
+        return False
 
     async def get_report(self, session: AsyncSession, report_id: int) -> Optional[Report]:
         stmt = select(Report).where(Report.id == report_id)
@@ -471,6 +504,9 @@ class ReportService:
 
         返回三元组：(文件名, MIME类型, 文件二进制内容)
         路由函数据此设置 HTTP 响应头（Content-Disposition + Content-Type）
+
+        注意：lazy 模式下不在此处触发 Milvus 写入；
+        写入由路由层在调用本方法前通过 `upload_to_vector_store_if_pending()` 触发。
         """
         r = await self.get_report(session, report_id)
         if not r:
@@ -492,8 +528,5 @@ class ReportService:
             result = (f"report_{r.id}.md", "text/markdown", self.generate_markdown(r))
         else:
             raise ValueError("Unsupported format. Use docx, pdf, pptx, or md.")
-
-        if r.content_markdown:
-            asyncio.create_task(self._embed_and_store(r.id, r.content_markdown))
 
         return result

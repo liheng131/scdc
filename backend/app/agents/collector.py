@@ -2,13 +2,14 @@
 CollectorAgent（数据采集 Agent）
 
 职责：
-- 使用 DDGS (DuckDuckGo Search) 搜索引擎搜索指定主题
+- 使用 AnySearch 搜索引擎搜索指定主题
 - 对搜索结果并发爬取目标页面的全文内容
 - 爬取失败时降级为使用搜索摘要（snippet）
 
-为什么使用 DDGS：
-- 完全免费，无需 API Key，无调用次数限制
-- DuckDuckGo 搜索结果覆盖度足以支撑一般市场洞察场景
+为什么使用 AnySearch：
+- 商业搜索 API，结果稳定可预期
+- 覆盖度足以支撑一般市场洞察场景
+- 通过 API Key 鉴权，避免被反爬拦截
 
 为什么并发爬取：
 - 网络 IO 密集，asyncio.gather 可大幅缩短总采集时间
@@ -17,9 +18,9 @@ CollectorAgent（数据采集 Agent）
 
 import asyncio
 import logging
-from typing import List, Optional
+from typing import List
 from app.schemas.agent import CollectorInput, CollectedItem, CollectorOutput
-from app.services.ddgs import DDGSService
+from app.services.anysearch import AnySearchService
 from app.crawlers.http_crawler import HTTPCrawler
 from app.schemas.search import SearchRequest
 from app.schemas.crawler import CrawlRequest
@@ -27,12 +28,8 @@ from app.schemas.crawler import CrawlRequest
 logger = logging.getLogger(__name__)
 
 class CollectorAgent:
-    def __init__(self, proxy: Optional[str] = None):
-        """
-        :param proxy: 可选 DDGS 代理，形如 "socks5://user:pass@host:port"。
-                      传入 None 时，DDGSService 会从 settings.ddgs_proxy 读取
-        """
-        self.search_service = DDGSService(proxy=proxy)
+    def __init__(self):
+        self.search_service = AnySearchService()
         self.crawler = HTTPCrawler()
 
     async def execute(self, input_data: CollectorInput) -> CollectorOutput:
@@ -52,11 +49,11 @@ class CollectorAgent:
         search_resp = await self.search_service.search(search_req)
 
         if not search_resp.success:
-            logger.warning(f"DDGS search failed for topic '{input_data.topic}': {search_resp.error}")
+            logger.warning(f"AnySearch search failed for topic '{input_data.topic}': {search_resp.error}")
             return CollectorOutput(
                 task_id=input_data.task_id,
                 success=False,
-                error=f"DDGS search failed: {search_resp.error}"
+                error=f"AnySearch search failed: {search_resp.error}"
             )
 
         if not search_resp.results:

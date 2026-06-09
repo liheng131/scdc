@@ -11,7 +11,7 @@
 """
 
 from typing import Optional
-from sqlalchemy import String, Text, JSON
+from sqlalchemy import String, Text, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin
 
@@ -27,3 +27,5 @@ class Report(Base, TimestampMixin):
     content_markdown: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     storage_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     images: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list, comment="配图列表")
+    pending_vector_upload: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True, comment="是否待写入向量库")
+    vector_uploaded_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="向量库写入时间 ISO 格式")

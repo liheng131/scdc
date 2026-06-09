@@ -391,12 +391,23 @@ async def test_ai_model(
             return success_response(data={"status": "ok", "message": data["choices"][0]["message"].get("content", "")[:50]})
 
         elif config.model_type == "embedding":
+            provider = (config.provider or "ollama").lower()
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{base_url}/v1/embeddings",
-                    json={"input": ["test"], "model": config.model_name},
-                    headers=headers | {"Content-Type": "application/json"},
-                )
+                if provider == "ollama":
+                    # Ollama 原生端点：POST /api/embeddings，payload {"model":..., "prompt":...}
+                    # （Ollama 0.1.32+ 才有 /v1/embeddings，但 /api/embeddings 一直存在）
+                    resp = await client.post(
+                        f"{base_url}/api/embeddings",
+                        json={"model": config.model_name, "prompt": "test"},
+                        headers=headers | {"Content-Type": "application/json"},
+                    )
+                else:
+                    # OpenAI 兼容端点（GPUStack、Ollama 0.1.32+、vLLM、OpenAI 等）
+                    resp = await client.post(
+                        f"{base_url}/v1/embeddings",
+                        json={"input": ["test"], "model": config.model_name},
+                        headers=headers | {"Content-Type": "application/json"},
+                    )
 
                 if resp.status_code == 401 or resp.status_code == 403:
                     raise HTTPException(
@@ -404,9 +415,24 @@ async def test_ai_model(
                         detail=f"认证失败：API Key 无效或已过期（HTTP {resp.status_code}）",
                     )
                 if resp.status_code == 404:
+                    model_hint = ""
+                    # 尝试列出可用模型供用户参考
+                    try:
+                        list_path = "/api/tags" if provider == "ollama" else "/v1/models"
+                        list_resp = await client.get(f"{base_url}{list_path}", headers=headers)
+                        if list_resp.status_code == 200:
+                            list_data = list_resp.json()
+                            if provider == "ollama":
+                                names = [m.get("name", "") for m in list_data.get("models", [])]
+                            else:
+                                names = [m.get("id", "") for m in list_data.get("data", [])]
+                            if names:
+                                model_hint = f"；该服务可用模型：{', '.join(names[:10])}"
+                    except Exception:
+                        pass
                     raise HTTPException(
                         status_code=404,
-                        detail=f"模型 '{config.model_name}' 不存在，请检查模型名",
+                        detail=f"模型 '{config.model_name}' 不存在，请检查模型名{model_hint}",
                     )
                 if resp.status_code >= 400:
                     try:
@@ -420,12 +446,18 @@ async def test_ai_model(
                     )
 
                 data = resp.json()
-                if not data.get("data"):
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"模型 '{config.model_name}' 未返回 embedding 结果",
-                    )
-                embedding = data["data"][0].get("embedding", [])
+                if provider == "ollama":
+                    # Ollama 原生返回：{"embedding": [...]}  （有时带 "model" 字段，无 data 包装）
+                    embedding = data.get("embedding", [])
+                else:
+                    # OpenAI 兼容返回：{"data": [{"embedding": [...], "index": 0}]}
+                    if not data.get("data"):
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"模型 '{config.model_name}' 未返回 embedding 结果",
+                        )
+                    embedding = data["data"][0].get("embedding", [])
+
                 if not embedding or len(embedding) == 0:
                     raise HTTPException(
                         status_code=502,
@@ -496,6 +528,19 @@ async def test_ai_model(
         raise HTTPException(
             status_code=504,
             detail=f"读取超时：服务 '{base_url}' 响应过慢",
+        )
+    except (httpx.RemoteProtocolError, httpx.RequestError) as e:
+        # 典型场景：base_url 填成了 Docker 网络名（如 http://ollama:11434），
+        # 但后端是 host 上跑的 uvicorn，DNS 解析失败 / TCP 直接被拒
+        # → httpx 抛 RemoteProtocolError 或 ServerDisconnected
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"无法与服务 '{base_url}' 建立有效连接：{str(e)[:120]}。"
+                f"请检查：① 服务地址是否可访问（host uvicorn 模式填 http://localhost:11434，"
+                f"Docker backend 容器模式填 Docker 网络名如 http://ollama:11434）；"
+                f"② 端口是否被防火墙拦截。"
+            ),
         )
     except Exception as e:
         raise HTTPException(

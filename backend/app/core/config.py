@@ -37,8 +37,10 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"            # 向量嵌入模型名称
     llm_api_key: str = ""                                # LLM 服务 API Key（如 GPUStack）
     llm_provider: str = "ollama"                         # LLM 提供商：ollama 或 gpustack
-    serpapi_key: str = ""                                # SerpAPI 搜索引擎 API Key (已废弃，保留为空以兼容旧配置)
-    ddgs_proxy: str = ""                                # DDGS (DuckDuckGo) 可选代理，形如 socks5://user:pass@host:port
+    anysearch_api_key: str = ""                         # AnySearch 搜索引擎 API Key
+    anysearch_base_url: str = "https://api.anysearch.com"  # AnySearch API base URL
+    anysearch_default_max_results: int = 10             # AnySearch 单次请求默认返回数量
+    anysearch_timeout: int = 10                          # AnySearch 请求默认超时（秒）
     milvus_url: str = "http://localhost:19530"           # Milvus 向量数据库
     opensearch_url: str = "http://localhost:9200"        # OpenSearch 全文搜索引擎
     minio_endpoint: str = "http://localhost:9000"        # MinIO 对象存储

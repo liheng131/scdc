@@ -26,6 +26,7 @@ volumes:
   milvus_data:      # Milvus 向量数据库文件
   etcd_data:        # etcd 键值存储（Milvus 依赖）
   minio_milvus_data: # MinIO 对象存储（Milvus 依赖）
+  ollama_data:      # Ollama 模型文件持久化
   prom_data:        # Prometheus 监控数据
   grafana_data:     # Grafana 面板配置
 
@@ -168,6 +169,28 @@ services:
       - scdc_net
     restart: unless-stopped
 
+  # ===== 推理与嵌入服务 =====
+  # Ollama：本地 LLM 推理 + Embedding 服务
+  # - 提供 OpenAI 兼容端点 (/v1/chat/completions, /v1/embeddings) 与 Ollama 原生端点 (/api/*)
+  # - 通过 ollama_data 卷持久化已下载的模型（避免重建容器时重复下载 1GB+ 模型）
+  ollama:
+    image: ollama/ollama:latest
+    container_name: scdc_ollama
+    ports:
+      - "11434:11434"  # 宿主机 11434 映射到容器 11434
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - scdc_net
+    healthcheck:
+      # 镜像里没装 curl/wget/nc，改用 pgrep 进程探测
+      test: ["CMD-SHELL", "pgrep -f 'ollama serve' >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
   # ===== 应用层 =====
   
   # Backend：FastAPI 后端服务，提供 AI Agent 流水线和业务 API
@@ -188,10 +211,11 @@ services:
       MINIO_BUCKET: "scdc-storage"
       OPENSEARCH_URL: "http://opensearch:9200"
       MILVUS_URL: "http://milvus:19530"
-      OLLAMA_BASE_URL: "http://120.79.96.231:6003"  # GPUStack 远程模型服务（公网 IP）
+      OLLAMA_BASE_URL: "http://ollama:11434"  # 容器内访问 ollama 服务（Docker 网络名）
       DEFAULT_MODEL: "qwen3-vl-32b-instruct-gguf"
       LLM_API_KEY: "gpustack_35d38e92e85f9689_acbc5009938cc7513ae70f7d71eaf7ba"
       LLM_PROVIDER: "gpustack"
+      EMBEDDING_MODEL: "nomic-embed-text"     # Ollama 端 embedding 模型名
     ports:
       - "8000:8000"
     networks:
@@ -201,6 +225,8 @@ services:
         condition: service_healthy  # 等待 PostgreSQL 健康后再启动
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_healthy  # 等待 Ollama 就绪后再启动（避免首调用卡下载）
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\" || exit 1"]
       interval: 10s

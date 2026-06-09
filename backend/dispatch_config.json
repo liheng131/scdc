@@ -1,0 +1,5 @@
+{
+  "cron_schedule": "0 8 * * *",
+  "notification_email": "u0015856@unilumin.com",
+  "webhook_url": ""
+}

@@ -12,8 +12,19 @@ from app.api.deps import get_current_active_user, get_current_active_user_sse
 from app.models.user import User
 from app.api.responses import success_response, ResponseModel
 from app.services.workflow import workflow_service
+from app.core.runtime_config import rumtime_config
 
 router = APIRouter()
+
+
+def _resolve_use_rag(req_use_rag: bool) -> bool:
+    """合并请求参数与系统配置。请求体 True 优先；否则读取 rumtime_config.direct_response_rag。"""
+    if req_use_rag:
+        return True
+    try:
+        return bool(rumtime_config.get("direct_response_rag", False))
+    except Exception:
+        return False
 
 
 class WorkflowStartRequest(BaseModel):
@@ -23,6 +34,7 @@ class WorkflowStartRequest(BaseModel):
         default_factory=lambda: ["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"],
         description="自定义分析维度",
     )
+    use_rag: bool = Field(default=False, description="直答时是否启用历史报告 RAG 检索")
 
 
 class FollowUpRequest(BaseModel):
@@ -31,6 +43,7 @@ class FollowUpRequest(BaseModel):
         default_factory=list,
         description="之前的对话历史，每个元素包含 role 和 content",
     )
+    use_rag: bool = Field(default=False, description="直答时是否启用历史报告 RAG 检索")
 
 
 class ReentryRequest(BaseModel):
@@ -43,14 +56,18 @@ async def start_workflow(
     req: WorkflowStartRequest,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    intent_result = await workflow_service._classify_intent(req.topic)
-    intent_type = intent_result.get("intent_type", "market_insight")
+    effective_use_rag = _resolve_use_rag(req.use_rag)
+    decision = await workflow_service.master_agent.process_message(
+        req.topic,
+        use_rag=effective_use_rag,
+    )
 
-    if intent_type == "general_question":
+    if decision.action == "direct":
         state = await workflow_service.create_workflow(
             topic=req.topic,
             max_items=0,
             dimensions=[],
+            use_rag=effective_use_rag,
         )
         state.is_direct_response = True
         return success_response(data={
@@ -59,24 +76,27 @@ async def start_workflow(
             "is_direct_response": True,
         })
 
-    if intent_type == "workflow_reentry":
+    if decision.action == "reentry":
         state = await workflow_service.create_workflow(
             topic=req.topic,
             max_items=req.max_items,
             dimensions=req.dimensions,
+            use_rag=effective_use_rag,
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
             "topic": state.topic,
-            "intent_type": intent_type,
-            "target_stage": intent_result.get("target_stage"),
-            "user_feedback": intent_result.get("user_feedback", ""),
+            "intent_type": decision.intent_type,
+            "target_stage": decision.target_stage,
+            "user_feedback": decision.user_feedback or "",
         })
 
+    # decision.action == "orchestrate"（启动完整四阶段工作流）
     state = await workflow_service.create_workflow(
         topic=req.topic,
         max_items=req.max_items,
         dimensions=req.dimensions,
+        use_rag=effective_use_rag,
     )
     return success_response(data={
         "workflow_id": state.workflow_id,
@@ -89,16 +109,57 @@ async def follow_up_workflow(
     req: FollowUpRequest,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
+    effective_use_rag = _resolve_use_rag(req.use_rag)
+    decision = await workflow_service.master_agent.process_message(
+        req.message,
+        conversation_history=req.conversation_history,
+        use_rag=effective_use_rag,
+        has_existing_report=True,
+    )
+
+    if decision.action == "orchestrate":
+        state = await workflow_service.create_workflow(
+            topic=req.message,
+            max_items=5,
+            dimensions=["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"],
+            conversation_history=req.conversation_history,
+            use_rag=effective_use_rag,
+        )
+        return success_response(data={
+            "workflow_id": state.workflow_id,
+            "topic": state.topic,
+            "intent_type": decision.intent_type,
+        })
+
+    if decision.action == "reentry":
+        state = await workflow_service.create_workflow(
+            topic=req.message,
+            max_items=5,
+            dimensions=[],
+            conversation_history=req.conversation_history,
+            use_rag=effective_use_rag,
+        )
+        return success_response(data={
+            "workflow_id": state.workflow_id,
+            "topic": state.topic,
+            "intent_type": decision.intent_type,
+            "target_stage": decision.target_stage,
+            "user_feedback": decision.user_feedback or "",
+        })
+
+    # decision.action == "direct"（追问为常规问题，走直答流）
     state = await workflow_service.create_workflow(
         topic=req.message,
         max_items=0,
         dimensions=[],
         conversation_history=req.conversation_history,
+        use_rag=effective_use_rag,
     )
     state.is_direct_response = True
     return success_response(data={
         "workflow_id": state.workflow_id,
         "topic": state.topic,
+        "intent_type": decision.intent_type,
     })
 
 
@@ -113,7 +174,7 @@ async def stream_workflow(
             yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
         return StreamingResponse(err_gen(), media_type="text/event-stream")
     return StreamingResponse(
-        workflow_service.run_workflow_stream(state),
+        workflow_service.run_workflow_stream(state, use_rag=state.use_rag),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

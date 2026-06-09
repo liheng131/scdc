@@ -47,6 +47,8 @@ class ReportOut(BaseModel):
     content_markdown: Optional[str]
     storage_ref: Optional[str]
     images: Optional[List[dict]] = None
+    pending_vector_upload: bool = True
+    vector_uploaded_at: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

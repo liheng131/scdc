@@ -621,4 +621,18 @@ onMounted(() => {
 .not-default {
   color: var(--scdc-ink-soft);
 }
+
+.form-hint {
+  font-size: 12px;
+  color: var(--scdc-ink-soft);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.form-hint code {
+  background: var(--scdc-bg-sunken);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: monospace;
+}
 </style>

@@ -117,6 +117,25 @@ async def lifespan(app: FastAPI):
                 base_url = rumtime_config.get("llm_base_url", "")
                 api_key = rumtime_config.get("llm_api_key", "")
                 model_name = rumtime_config.get("default_model", "")
+                # 连通性探测：避免把不可达的 base_url（如 Docker 模式下的 ollama:11434）
+                # 自动迁移到 DB，导致后续 host uvicorn 模式下该配置无法使用。
+                # 见 .trae/documents/fix-ollama-host-mode-base-url-and-healthcheck.md
+                import httpx as _httpx
+                try:
+                    async with _httpx.AsyncClient(timeout=5) as _client:
+                        _probe = await _client.get(f"{base_url.rstrip('/')}/api/tags")
+                        if _probe.status_code != 200:
+                            logger.warning(
+                                "llm_base_url '%s' 不通 (HTTP %d)，跳过自动迁移到 ai_model_configs",
+                                base_url, _probe.status_code,
+                            )
+                            return
+                except Exception as _e:
+                    logger.warning(
+                        "llm_base_url '%s' 连通性探测失败: %s；跳过自动迁移到 ai_model_configs（请在系统设置页手动添加）",
+                        base_url, _e,
+                    )
+                    return
                 from app.core.security import encrypt_api_key
                 encrypted_key = encrypt_api_key(api_key)
                 await conn.execute(
@@ -169,6 +188,15 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to initialize Milvus collection: %s", e)
     logger.info("Starting scheduler loop...")
     scheduler.start_loop()
+
+    # 启动期打印 AnySearch 实际生效的配置（base_url 与 api_key 是否已加载）
+    try:
+        from app.services.anysearch import AnySearchService
+        _probe = AnySearchService()
+        logger.info("AnySearch base_url=%r api_key_set=%s", _probe.base_url, bool(_probe.api_key))
+    except Exception as e:
+        logger.warning("Failed to probe AnySearch config at startup: %s", e)
+
     yield
     logger.info("Stopping scheduler loop...")
     scheduler.stop_loop()

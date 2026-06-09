@@ -1,10 +1,9 @@
 import json
 import logging
-import traceback
 import httpx
 from typing import Dict, Any, Optional
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 from app.core.config import settings
 from app.core.runtime_config import rumtime_config
@@ -14,9 +13,9 @@ logger = logging.getLogger(__name__)
 
 class IntentClassifier:
     def __init__(self):
-        self.llm_provider = rumtime_config.get("llm_provider")
-        self.default_model = rumtime_config.get("default_model")
-        self.llm_base_url = rumtime_config.get("llm_base_url")
+        self.llm_provider = rumtime_config.get("llm_provider") or "ollama"
+        self.default_model = rumtime_config.get("default_model") or settings.default_model
+        self.llm_base_url = rumtime_config.get("llm_base_url") or settings.ollama_base_url
         self.llm_api_key = settings.llm_api_key
         self._db_config_loaded = False
 
@@ -65,9 +64,10 @@ class IntentClassifier:
         message: str,
         conversation_history: list = None,
         has_existing_report: bool = False,
+        include_history: bool = True,
     ) -> str:
         history_text = ""
-        if conversation_history:
+        if include_history and conversation_history:
             recent = conversation_history[-6:]
             history_parts = []
             for msg in recent:
@@ -77,7 +77,9 @@ class IntentClassifier:
 
         report_context = "\u7528\u6237\u5f53\u524d\u6709\u5df2\u751f\u6210\u7684\u62a5\u544a\u3002" if has_existing_report else "\u7528\u6237\u5f53\u524d\u8fd8\u6ca1\u6709\u751f\u6210\u62a5\u544a\u3002"
 
-        template = """\u4f60\u662f\u4e00\u4e2a\u610f\u56fe\u5206\u7c7b\u5668\u3002\u8bf7\u5c06\u4ee5\u4e0b\u7528\u6237\u6d88\u606f\u5206\u7c7b\u4e3a\u4e09\u79cd\u610f\u56fe\u4e4b\u4e00\u3002
+        template = """\u3010\u91cd\u8981\u539f\u5219\u3011\u4f60\u5fc5\u987b**\u53ea\u6839\u636e\u7528\u6237\u6700\u65b0\u4e00\u6761\u6d88\u606f**\u5224\u65ad\u610f\u56fe\u7c7b\u578b\u3002
+\u5bf9\u8bdd\u5386\u53f2**\u4ec5\u4f5c\u4e3a\u8f85\u52a9\u53c2\u8003**\uff1b\u5982\u679c\u5386\u53f2\u8bdd\u9898\u4e0e\u6700\u65b0\u6d88\u606f\u65e0\u5173\uff0c**\u4e0d\u8981\u88ab\u5386\u53f2\u8bdd\u9898\u5f71\u54cd**\u3002
+\u4f8b\u5982\uff1a\u7528\u6237\u4e0a\u4e00\u8f6e\u95ee\u4e86"AI\u82af\u7247\u5e02\u573a\u5206\u6790"\uff08\u5df2\u751f\u6210\u62a5\u544a\uff09\uff0c\u8fd9\u4e00\u8f6e\u95ee"\u4f60\u4f1a\u505a\u4ec0\u4e48"\u6216"\u4f60\u597d"\u2014\u2014\u8fd9\u5c5e\u4e8e **general_question**\uff0c**\u4e0d\u662f** workflow_reentry\u3002
 
 \u5bf9\u8bdd\u5386\u53f2\uff1a
 {history_text}
@@ -105,20 +107,24 @@ class IntentClassifier:
   "reasoning": "\u7b80\u77ed\u5206\u7c7b\u7406\u7531\uff08\u4e00\u53e5\u8bdd\uff09",
   "user_feedback": "\u7528\u6237\u7684\u5177\u4f53\u53cd\u9988\u63cf\u8ff0\uff08\u4ec5workflow_reentry\u65f6\u9700\u8981\uff0c\u5426\u5219\u4e3anull\uff09"
 }}"""
+        if not include_history:
+            history_text = "（无需参考历史）"
+        elif not history_text:
+            history_text = "（无历史记录）"
         prompt = template.format(
-            history_text=history_text if history_text else "（无历史记录）",
+            history_text=history_text,
             report_context=report_context,
             message=message,
         )
         return prompt
 
     @retry(
-        stop=stop_after_attempt(1),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(2),
         retry=retry_if_exception_type((httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, json.JSONDecodeError)),
         reraise=True
     )
-    async def _call_llm(self, prompt: str, timeout: int = 30) -> Dict[str, Any]:
+    async def _call_llm(self, prompt: str, timeout: int = 10) -> Dict[str, Any]:
         if self.llm_provider == "gpustack":
             payload = {
                 "model": self.default_model,
@@ -152,18 +158,36 @@ class IntentClassifier:
                 raise json.JSONDecodeError("Empty response after cleaning", "", 0)
             return json.loads(response_text)
 
+    async def _classify_internal(
+        self,
+        message: str,
+        conversation_history: list = None,
+        has_existing_report: bool = False,
+        include_history: bool = True,
+    ) -> dict:
+        """Internal helper: build prompt and call LLM, returns the raw classification dict.
+        Does NOT perform arbitration. This is the building block used by classify() and
+        the arbitration re-classification path."""
+        await self._ensure_db_config()
+        prompt = self._build_classification_prompt(
+            message, conversation_history, has_existing_report, include_history=include_history
+        )
+        return await self._call_llm(prompt, timeout=10)
+
     async def classify(
         self,
         message: str,
         conversation_history: list = None,
         has_existing_report: bool = False,
+        _skip_arbitration: bool = False,
     ) -> dict:
         await self._ensure_db_config()
         logger.info(f"IntentClassifier classifying message: '{message[:100]}...'")
 
         try:
-            prompt = self._build_classification_prompt(message, conversation_history, has_existing_report)
-            result = await self._call_llm(prompt, timeout=30)
+            result = await self._classify_internal(
+                message, conversation_history, has_existing_report, include_history=True
+            )
 
             intent_type = result.get("intent_type", "market_insight")
             if intent_type not in ("market_insight", "general_question", "workflow_reentry"):
@@ -196,12 +220,62 @@ class IntentClassifier:
                 "user_feedback": user_feedback,
             }
 
+            # Arbitration: if the with-history result has low confidence, re-classify without
+            # history and adopt that result if it disagrees and has higher confidence. This
+            # mitigates context-bias where the LLM overweights prior conversation topics.
+            if not _skip_arbitration and confidence < 0.6:
+                try:
+                    no_hist_result = await self.classify(
+                        message, None, has_existing_report, _skip_arbitration=True
+                    )
+                    no_hist_intent = no_hist_result.get("intent_type")
+                    no_hist_conf = no_hist_result.get("confidence", 0.0)
+                    if no_hist_conf > 0.6 and no_hist_intent != intent_type:
+                        logger.info(
+                            "Intent arbitration: with_history=%s(%.2f) vs without_history=%s(%.2f), adopting without_history",
+                            intent_type, confidence,
+                            no_hist_intent, no_hist_conf,
+                        )
+                        intent_type = no_hist_intent
+                        target_stage = no_hist_result.get("target_stage")
+                        confidence = no_hist_conf
+                        reasoning = (no_hist_result.get("reasoning", "") + " (经无历史仲裁)").strip()
+                        user_feedback = no_hist_result.get("user_feedback")
+                        classification = {
+                            "intent_type": intent_type,
+                            "target_stage": target_stage,
+                            "confidence": confidence,
+                            "reasoning": reasoning,
+                            "user_feedback": user_feedback,
+                        }
+                except Exception as arb_err:
+                    logger.warning("Intent arbitration failed (%s), keeping original result", type(arb_err).__name__)
+
             logger.info(f"Intent classification result: {intent_type}, confidence={confidence:.2f}")
             return classification
 
+        except httpx.ReadTimeout:
+            logger.warning("Intent classification timeout, falling back to market_insight")
+            return {
+                "intent_type": "market_insight",
+                "target_stage": None,
+                "confidence": 0.3,
+                "reasoning": "Classification timeout, defaulting to market_insight",
+                "user_feedback": None,
+            }
+
+        except httpx.ConnectError:
+            logger.warning("Intent classification connection error, falling back to market_insight")
+            return {
+                "intent_type": "market_insight",
+                "target_stage": None,
+                "confidence": 0.3,
+                "reasoning": "Classification connection error, defaulting to market_insight",
+                "user_feedback": None,
+            }
+
         except Exception as e:
-            logger.error(f"Intent classification failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            logger.warning("Falling back to default intent: market_insight")
+            logger.warning("Intent classification failed (%s), falling back to market_insight", type(e).__name__)
             return {
                 "intent_type": "market_insight",
                 "target_stage": None,

@@ -8,7 +8,7 @@ from app.schemas.agent import CollectorInput, CleanerInput, AnalyzerInput, Repor
 
 @pytest.mark.asyncio
 async def test_full_pipeline():
-    # DDGS 始终可用，无需 skip 条件
+    # AnySearch 始终可用，无需 skip 条件
     task_id = "e2e-test-001"
     topic = "2025年AI芯片市场趋势"
 

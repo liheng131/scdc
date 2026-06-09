@@ -10,7 +10,7 @@ API 路由聚合模块
 from fastapi import APIRouter, Depends
 from app.api.responses import success_response, ResponseModel
 from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, workflow, settings, metrics
-from app.services.ddgs import DDGSService, ddgs_health, DEFAULT_BACKEND
+from app.services.anysearch import AnySearchService, anysearch_health, DEFAULT_BACKEND
 from app.schemas.search import SearchRequest
 from app.api.deps import get_current_active_user
 from app.models.user import User
@@ -37,8 +37,8 @@ api_router.include_router(workflow.router, prefix="/workflow", tags=["workflow"]
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_router.include_router(metrics.router, prefix="/metrics-json", tags=["metrics"])
 
-# 共享一个 DDGSService 实例给健康检查用
-_ddgs_probe = DDGSService()
+# 共享一个 AnySearchService 实例给健康检查用
+_anysearch_probe = AnySearchService()
 
 @api_router.get("/health", response_model=ResponseModel)
 async def health_check():
@@ -54,24 +54,26 @@ async def health_check():
     return success_response(data={"version": "1.0.0", "environment": settings.app_env})
 
 
-@api_router.get("/health/ddgs", response_model=ResponseModel)
-async def ddgs_health_check(
+@api_router.get("/health/anysearch", response_model=ResponseModel)
+async def anysearch_health_check(
     current_user: User = Depends(get_current_active_user),
 ) -> dict:
     """
-    DDGS 搜索服务健康检查端点（路径：/api/v1/health/ddgs）
+    AnySearch 搜索服务健康检查端点（路径：/api/v1/health/anysearch）
 
-    主动执行一次轻量搜索（query="ping", max_results=1）探测 DDGS 可用性，
+    主动执行一次轻量搜索（query="ping", max_results=1）探测 AnySearch 可用性，
     返回最近一次搜索的状态、最近错误、引擎配置等诊断信息。
     """
-    probe = await _ddgs_probe.search(SearchRequest(query="ping", timeout=5))
+    probe = await _anysearch_probe.search(SearchRequest(query="ping", timeout=5))
 
     payload = {
         "status": "ok" if probe.success else "degraded",
         "engine": DEFAULT_BACKEND,
-        "last_check_at": ddgs_health.last_check_at,
-        "last_error": ddgs_health.last_error,
-        "consecutive_failures": ddgs_health._consecutive_failures,
+        "effective_api_url": _anysearch_probe.base_url,
+        "api_key_set": bool(_anysearch_probe.api_key),
+        "last_check_at": anysearch_health.last_check_at,
+        "last_error": anysearch_health.last_error,
+        "consecutive_failures": anysearch_health._consecutive_failures,
         "probe": {
             "success": probe.success,
             "result_count": probe.total_results,
