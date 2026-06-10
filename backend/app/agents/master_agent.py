@@ -56,6 +56,31 @@ from app.services.direct_response import DirectResponseService
 
 logger = logging.getLogger(__name__)
 
+# Reentry guard 关键词：消息中包含任一关键词 → 视为用户明确要求重入某个阶段
+# 不包含这些词 + 短文本（< 20 字）→ 视为分类器误判，改判为 direct
+REENTRY_KEYWORDS = [
+    "重新",
+    "不够",
+    "改进",
+    "格式",
+    "维度",
+    "深度",
+    "完善",
+    "优化",
+    "调整",
+    "重做",
+    "再",
+]
+
+# Chitchat guard 关键词：消息中包含任一关键词 → 视为闲聊/能力询问，
+# 强改判为 direct，避免误启动工作流（不限制消息长度）
+CHITCHAT_KEYWORDS = [
+    "你好", "hi", "嗨", "在吗", "再见", "谢谢",   # 问候
+    "你能", "你会", "你是", "有什么功能", "能做啥",  # AI 能力询问
+    "什么是", "怎么用", "如何", "为什么", "在哪",    # 概念询问
+    "是什么", "干嘛",                                # 模糊询问
+]
+
 
 @dataclass
 class MasterDecision:
@@ -177,6 +202,36 @@ class MasterAgent:
             user_feedback=user_feedback,
             extra={"use_rag": use_rag},
         )
+
+        # Reentry guard：短文本（< 20 字）且不含重入关键词 → 视为误判的 workflow_reentry，
+        # 改判为 direct，避免误启动工作流
+        safe_message = message or ""
+
+        # Guard 1: 短文本+无重入关键词 → reentry 误判
+        if (
+            decision.action == "reentry"
+            and len(safe_message) < 20
+            and not any(kw in safe_message for kw in REENTRY_KEYWORDS)
+        ):
+            logger.warning(
+                'reentry-guard: short msg "%s" without reentry keywords, falling back to direct',
+                safe_message,
+            )
+            decision.action = "direct"
+            decision.reasoning = (decision.reasoning or "") + " [reentry-guard: 短文本+无重入关键词]"
+
+        # Guard 2: 闲聊关键词 → orchestrate/reentry 误判
+        elif (
+            decision.action in ("reentry", "orchestrate")
+            and any(kw in safe_message for kw in CHITCHAT_KEYWORDS)
+        ):
+            logger.warning(
+                'chitchat-guard: msg "%s" contains chitchat keywords, falling back to direct',
+                safe_message,
+            )
+            decision.action = "direct"
+            decision.reasoning = (decision.reasoning or "") + " [chitchat-guard: 含闲聊关键词]"
+
         logger.info(
             "MasterAgent decision: action=%s, intent=%s, confidence=%.2f",
             decision.action, decision.intent_type, decision.confidence,

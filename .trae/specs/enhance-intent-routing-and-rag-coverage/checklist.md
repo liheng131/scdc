@@ -18,7 +18,7 @@
 - [x] `IntentClassifier._build_classification_prompt()` 顶部含"只看最新一条消息"指令
 - [x] `IntentClassifier.classify()` 在 confidence < 0.6 时调无历史版本仲裁
 - [x] 仲裁逻辑：若无历史 confidence > 0.6 且与带历史结果不一致，采用无历史
-- [x] 端到端测试 "复杂历史后问'你会做什么'" → 分类 = `general_question`
+- [ ] 端到端测试 "复杂历史后问'你会做什么'" → 分类 = `general_question`（→ 见 fix-intent-reentry-overcorrection spec 的 `test_e2e_intent_routing.py`）
 - [x] 端到端测试 "闲聊历史后问'AI 芯片市场'" → 分类 = `market_insight`（保证非过度修正）
 
 ## Task 3 — 直答 RAG 开关
