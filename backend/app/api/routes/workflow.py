@@ -4,7 +4,7 @@
 提供对话式市场洞察入口：用户提交分析主题 → 全流程自动执行 → 返回结构化报告。
 """
 
-from typing import Any, List
+from typing import Any, List, Literal, Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -49,6 +49,36 @@ class FollowUpRequest(BaseModel):
 class ReentryRequest(BaseModel):
     target_stage: str = Field(..., description="目标阶段: collecting, analyzing, reporting")
     user_feedback: str = Field(default="", description="用户补充反馈/约束")
+
+
+# --- Phase 2 Human-in-the-Loop (Spec 1) ---
+class ConfirmStageRequest(BaseModel):
+    """阶段确认请求
+
+    decision=accept → 进入下一阶段
+    decision=reject → 重跑当前阶段
+        user_edits  非空 → 与原 topic 合并后重跑
+        user_feedback 非空 → AI 解析后调整策略重跑
+        两者都为空 → 完全重跑
+    """
+    decision: Literal["accept", "reject"]
+    user_edits: Optional[dict] = Field(
+        default=None,
+        description="用户编辑（如 extra_urls/extra_keywords）",
+    )
+    user_feedback: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="用户文字反馈",
+    )
+
+
+class WorkflowStatusResponse(BaseModel):
+    run_id: str
+    stage: str
+    stage_state: str
+    stage_output: Optional[dict] = None
+    stage_history: Optional[list] = None
 
 
 @router.post("/start")

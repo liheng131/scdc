@@ -4,6 +4,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin
 
 
+class StageState:
+    """阶段状态枚举（不直接用 StrEnum，便于跨 Python 版本兼容）"""
+    RUNNING = "running"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class WorkflowRun(Base, TimestampMixin):
     __tablename__ = "workflow_runs"
 
@@ -15,3 +23,10 @@ class WorkflowRun(Base, TimestampMixin):
     stages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 2 Human-in-the-Loop：阶段状态机 + 输出 + 历史
+    # Spec 1: 数据采集阶段确认
+    stage_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=StageState.RUNNING, server_default=StageState.RUNNING
+    )
+    stage_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    stage_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
