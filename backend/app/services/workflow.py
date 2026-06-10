@@ -4,6 +4,11 @@
 提供简化的市场洞察工作流执行。
 状态流: idle → running(收集→清洗→分析→报告) → completed
 
+Spec 1 (Phase 2 Human-in-the-Loop): 在数据采集阶段后插入"用户确认"环节。
+- collecting 完成 → stage_state='awaiting_confirmation'，SSE 流正常结束
+- 用户调用 /confirm: accept → 进入下一阶段；reject → 重跑当前阶段
+- 完整的 SSE 重订阅机制：confirm 后启动新一轮 SSE 流
+
 前端以对话形式展示，仅显示最终报告结果。
 """
 
@@ -11,14 +16,17 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional, AsyncGenerator
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, AsyncGenerator, List
 
+from fastapi import HTTPException
 from sqlalchemy import select, update
 from app.core.db import async_session_factory
-from app.models.workflow_run import WorkflowRun
+from app.models.workflow_run import WorkflowRun, StageState
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.master_agent import MasterAgent
-from app.schemas.agent import OrchestratorInput
+from app.agents.collector import CollectorAgent
+from app.schemas.agent import OrchestratorInput, CollectorInput
 from app.services.intent_classifier import IntentClassifier
 from app.services.direct_response import DirectResponseService
 
@@ -39,6 +47,10 @@ STAGE_ICONS = {
     "reporting": "📝",
 }
 
+# 最大重试次数（防止用户无限重试耗尽搜索 API 配额）
+MAX_RETRY_PER_STAGE = 5
+
+
 class WorkflowState:
     def __init__(self, workflow_id: str, topic: str, max_items: int, dimensions: list, conversation_history: list = None, use_rag: bool = False):
         self.workflow_id = workflow_id
@@ -54,6 +66,10 @@ class WorkflowState:
         self.result: Optional[Dict[str, Any]] = None
         self.is_direct_response: bool = False
         self.use_rag: bool = use_rag
+        # Phase 2 Human-in-the-Loop 状态机（Spec 1）
+        self.stage_state: str = StageState.RUNNING
+        self.stage_output: Optional[Dict[str, Any]] = None
+        self.stage_history: List[Dict[str, Any]] = []
 
 class WorkflowService:
     def __init__(self):
@@ -112,6 +128,9 @@ class WorkflowService:
                     status="idle",
                     current_stage="",
                     stages_json=json.dumps({}),
+                    stage_state=StageState.RUNNING,  # Phase 2: 初始 running
+                    stage_output=None,
+                    stage_history=None,
                 )
                 session.add(wf_run)
                 await session.commit()
@@ -142,6 +161,10 @@ class WorkflowService:
                     state.stages = json.loads(wf_run.stages_json) if wf_run.stages_json else {}
                     state.result = json.loads(wf_run.result_json) if wf_run.result_json else None
                     state.error = wf_run.error
+                    # Phase 2: 加载 state machine 字段
+                    state.stage_state = wf_run.stage_state or StageState.RUNNING
+                    state.stage_output = json.loads(wf_run.stage_output) if wf_run.stage_output else None
+                    state.stage_history = json.loads(wf_run.stage_history) if wf_run.stage_history else []
                     self._workflows[workflow_id] = state
                     return state
         except Exception as e:
@@ -161,6 +184,10 @@ class WorkflowService:
                         stages_json=json.dumps(state.stages),
                         result_json=json.dumps(state.result) if state.result else None,
                         error=state.error,
+                        # Phase 2: 同步 state machine
+                        stage_state=state.stage_state,
+                        stage_output=json.dumps(state.stage_output) if state.stage_output is not None else None,
+                        stage_history=json.dumps(state.stage_history),
                     )
                 )
                 await session.commit()
@@ -334,6 +361,166 @@ class WorkflowService:
 
         async for sse_event in self.run_workflow_stream(state, start_stage=target_stage, reentry_context=user_feedback):
             yield sse_event
+
+    # ========== Phase 2 Human-in-the-Loop (Spec 1) ==========
+
+    async def run_collecting_only_stream(self, state: WorkflowState) -> AsyncGenerator[str, None]:
+        """Spec 1: 仅运行 collecting 阶段，结束后进入 awaiting_confirmation 状态。
+
+        与 run_workflow_stream 的区别：
+        - 不调用 OrchestratorAgent，只调用 CollectorAgent
+        - 完成后设 state.stage_state='awaiting_confirmation'
+        - SSE 流正常结束（yield stage_complete 事件后停止）
+        """
+        logger.info(f"[{state.workflow_id}] run_collecting_only_stream: topic='{state.topic}'")
+        state.status = "running"
+        state.stage_state = StageState.RUNNING
+        state.current_stage = "collecting"
+        await self._persist_stage_update(state)
+
+        # SSE: stage_start
+        yield self._sse("stage_start", {
+            "stage": "collecting",
+            "label": STAGE_LABELS["collecting"],
+            "icon": STAGE_ICONS["collecting"],
+            "index": 0,
+            "total": 4,
+        })
+
+        try:
+            # 直接调用 CollectorAgent，不走 OrchestratorAgent
+            collector = CollectorAgent()
+            col_in = CollectorInput(
+                task_id=state.workflow_id,
+                topic=state.topic,
+                max_items=state.max_items,
+            )
+            col_out = await collector.execute(col_in)
+
+            if not col_out.success:
+                raise RuntimeError(f"Collector failed: {col_out.error}")
+
+            # 构造 stage_output（供前端展示源列表）
+            sources = [
+                {
+                    "source_type": it.source_type,
+                    "source_uri": it.source_uri,
+                    "title": it.title,
+                    "snippet": (it.content or "")[:300],
+                    "content_length": len(it.content or ""),
+                    "metadata": it.metadata or {},
+                }
+                for it in col_out.items
+            ]
+            stage_output = {
+                "stage": "collecting",
+                "sources": sources,
+                "item_count": len(sources),
+                "warning": col_out.warning,
+            }
+
+            # 更新 state
+            state.stage_output = stage_output
+            state.stages["collecting"] = {
+                "item_count": len(sources),
+                "warning": col_out.warning,
+            }
+            state.stage_state = StageState.AWAITING_CONFIRMATION
+            await self._persist_stage_update(state)
+
+            # SSE: stage_complete 事件后流正常结束
+            yield self._sse("stage_complete", {
+                "stage": "collecting",
+                "label": STAGE_LABELS["collecting"],
+                "stage_state": StageState.AWAITING_CONFIRMATION,
+                "stage_output": stage_output,
+            })
+            logger.info(
+                f"[{state.workflow_id}] collecting stage done, %d items, awaiting confirmation",
+                len(sources),
+            )
+        except Exception as e:
+            logger.error(f"[{state.workflow_id}] collecting stage failed: {e}", exc_info=True)
+            state.status = "failed"
+            state.error = str(e)[:500]
+            state.stage_state = StageState.FAILED
+            await self._persist_stage_update(state)
+            yield self._sse("stage_error", {
+                "stage": "collecting",
+                "label": STAGE_LABELS["collecting"],
+                "error": state.error,
+            })
+
+    async def confirm_stage(self, state: WorkflowState, decision: str,
+                            user_edits: Optional[dict] = None,
+                            user_feedback: Optional[str] = None) -> Dict[str, Any]:
+        """Spec 1: 处理用户阶段确认。
+
+        状态机：
+        - 当前 stage_state 必须 == 'awaiting_confirmation'，否则 409
+        - decision='accept': stage_state='running'，下一阶段用 run_workflow_stream 启动
+        - decision='reject': stage_state='running'，重跑当前阶段
+        - 重试次数 = len(stage_history)，> MAX_RETRY_PER_STAGE → 429
+        """
+        if state.stage_state != StageState.AWAITING_CONFIRMATION:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot confirm: current stage_state is '{state.stage_state}', "
+                       f"expected '{StageState.AWAITING_CONFIRMATION}'",
+            )
+
+        if decision not in ("accept", "reject"):
+            raise HTTPException(status_code=422, detail=f"Invalid decision: {decision}")
+
+        # 重试次数检查
+        if decision == "reject" and len(state.stage_history) >= MAX_RETRY_PER_STAGE:
+            raise HTTPException(
+                status_code=429,
+                detail=f"重试次数过多（已 {len(state.stage_history)} 次），请接受或取消工作流",
+            )
+
+        # 记录到 stage_history
+        history_entry = {
+            "stage": state.current_stage,
+            "decision": decision,
+            "user_edits": user_edits,
+            "user_feedback": user_feedback,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        state.stage_history.append(history_entry)
+
+        # 决定下一阶段
+        if decision == "accept":
+            current_idx = STAGE_SEQUENCE.index(state.current_stage) if state.current_stage in STAGE_SEQUENCE else -1
+            if current_idx < 0 or current_idx >= len(STAGE_SEQUENCE) - 1:
+                # 已经在 reporting 阶段（理论上不应该，但兜底）
+                next_stage = None
+                state.stage_state = StageState.COMPLETED
+            else:
+                next_stage = STAGE_SEQUENCE[current_idx + 1]
+                state.current_stage = next_stage
+                state.stage_state = StageState.RUNNING
+            state.stage_output = None  # 清除上一次的输出
+        else:
+            # reject: 重跑当前阶段
+            state.stage_state = StageState.RUNNING
+            # 应用 user_edits 合并到 topic
+            if user_edits:
+                extra_urls = user_edits.get("extra_urls") or []
+                extra_keywords = user_edits.get("extra_keywords") or []
+                if extra_urls:
+                    state.topic = f"{state.topic}\n\n补充URL:\n" + "\n".join(extra_urls)
+                if extra_keywords:
+                    state.topic = f"{state.topic}\n\n补充关键词: " + ", ".join(extra_keywords)
+            if user_feedback:
+                state.topic = f"{state.topic}\n\n用户反馈: {user_feedback}"
+            next_stage = state.current_stage  # 重跑
+
+        await self._persist_stage_update(state)
+        return {
+            "next_stage": next_stage,
+            "stage_state": state.stage_state,
+        }
 
     def _sse(self, event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"

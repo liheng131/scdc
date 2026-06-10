@@ -5,7 +5,7 @@
 """
 
 from typing import Any, List, Literal, Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from app.api.deps import get_current_active_user, get_current_active_user_sse
@@ -214,6 +214,35 @@ async def stream_workflow(
     )
 
 
+# --- Phase 2: 数据采集阶段（collecting）单独 SSE 流 ---
+@router.get("/{workflow_id}/stream-collecting")
+async def stream_collecting(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    """Spec 1: 仅运行 collecting 阶段的 SSE 流。
+    阶段结束后 stage_state='awaiting_confirmation'，流正常结束。
+    """
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    if state.stage_state != "running":
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow is not in 'running' state (current: {state.stage_state})\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        workflow_service.run_collecting_only_stream(state),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{workflow_id}", response_model=ResponseModel)
 async def get_workflow_status(
     workflow_id: str,
@@ -230,6 +259,51 @@ async def get_workflow_status(
         "stages": state.stages,
         "result": state.result,
         "error": state.error,
+        # Phase 2: 暴露状态机字段
+        "stage_state": state.stage_state,
+        "stage_output": state.stage_output,
+        "stage_history": state.stage_history,
+    })
+
+
+@router.post("/{workflow_id}/confirm")
+async def confirm_stage(
+    workflow_id: str,
+    req: ConfirmStageRequest,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Spec 1: 用户确认/拒绝当前阶段输出。
+
+    accept → 进入下一阶段（next_stage 非空）
+    reject → 重跑当前阶段（next_stage == current_stage）
+    """
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+    result = await workflow_service.confirm_stage(
+        state,
+        decision=req.decision,
+        user_edits=req.user_edits,
+        user_feedback=req.user_feedback,
+    )
+
+    # 构造新 SSE 流 URL
+    next_stage = result.get("next_stage")
+    if next_stage == "cleaning":
+        sse_url = f"/api/v1/workflow/{workflow_id}/stream"  # 走完整 run_workflow_stream
+    elif next_stage == "collecting":
+        sse_url = f"/api/v1/workflow/{workflow_id}/stream-collecting"  # 重跑 collecting
+    else:
+        sse_url = None  # completed
+
+    return success_response(data={
+        "workflow_id": state.workflow_id,
+        "stage": state.current_stage,
+        "stage_state": state.stage_state,
+        "next_stage": next_stage,
+        "sse_url": sse_url,
+        "stage_history_length": len(state.stage_history),
     })
 
 
