@@ -5,8 +5,9 @@ import { Promotion, Download, CopyDocument, Delete, Refresh, Plus, Close } from 
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as echarts from 'echarts';
 import { workflowApi, reportsApi } from '../api';
-import { useWorkflowStore } from '../stores/workflow';
+import { useWorkflowStore, type ConfirmContext } from '../stores/workflow';
 import { useAuthStore } from '@/stores/auth';
+import StageConfirmDialog from '../components/StageConfirmDialog.vue';
 
 const auth = useAuthStore();
 const { t } = useI18n();
@@ -108,6 +109,104 @@ const handleStop = () => {
   currentStageHint.value = null;
 };
 
+// Phase 2: 阶段确认后续流转
+// accept → next_stage='cleaning' → 启动完整流(走 cleaning→analyzing→reporting)
+// reject → next_stage='collecting' → 启动 collecting-only 流
+const startNextStageStream = (
+  convId: string,
+  assistantIdx: number,
+  workflowId: string,
+  nextStage: string | null,
+) => {
+  if (!nextStage) {
+    // completed
+    return;
+  }
+  // 阶段提示图标映射
+  const stageIcon: Record<string, string> = {
+    collecting: '🔍',
+    cleaning: '🧹',
+    analyzing: '🧠',
+    reporting: '📝',
+  };
+  // 启动阶段流(这里使用空 callbacks,因为我们走的是新一轮流,
+  // 实际项目里可以把现在 buildStreamCallbacks 抽到顶层共用)
+  // 简化:仅做最小实现,后续 Phase 3.5 再抽象
+  const minimalCallbacks = {
+    onStageStart: (data: any) => {
+      currentStageHint.value = { icon: data.icon, label: data.label };
+      scrollToBottom();
+    },
+    onStageError: (data: any) => {
+      loading.value = false;
+      currentStageHint.value = null;
+      ElMessage.error(`${data.label}失败`);
+    },
+    onCompleted: (data: any) => {
+      currentWorkflowId.value = data.workflow_id || null;
+      loading.value = false;
+      currentStageHint.value = null;
+      scrollToBottom();
+      nextTick(() => {
+        const updatedConv = workflowStore.activeConversation;
+        if (updatedConv) renderChartsForMessages(updatedConv.messages);
+      });
+    },
+    onError: (data: any) => {
+      loading.value = false;
+      currentStageHint.value = null;
+      ElMessage.error(`工作流异常: ${data.error}`);
+    },
+  };
+  // 这里 onAwaitingConfirmation 暂以极简方式重新挂回去
+  const cbWithConfirm = {
+    ...minimalCallbacks,
+    onAwaitingConfirmation: (data: any) => {
+      loading.value = false;
+      currentStageHint.value = null;
+      const ctx: ConfirmContext = {
+        workflowId: workflowStore.runningWorkflowId || workflowId,
+        convId,
+        assistantIdx,
+        stage: data.stage,
+        stageOutput: data.stage_output || {},
+        stageHistoryLength: data.stage_history_length || 0,
+      };
+      workflowStore.showConfirmDialog(ctx);
+    },
+  };
+  void stageIcon; // 占位保留
+  if (nextStage === 'collecting') {
+    workflowStore.startCollectingStream(convId, assistantIdx, workflowId, cbWithConfirm);
+  } else {
+    // cleaning/analyzing/reporting → 走完整流
+    workflowStore.startWorkflowStream(convId, assistantIdx, workflowId, cbWithConfirm);
+  }
+};
+
+const handleConfirmDialogConfirmed = (data: { ctx: ConfirmContext; response: any; decision: 'accept' | 'reject' }) => {
+  const { ctx, response } = data;
+  const nextStage = response?.next_stage as string | null | undefined;
+  // 重新进入 loading 状态
+  loading.value = true;
+  showSlowHint.value = false;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+  startNextStageStream(ctx.convId, ctx.assistantIdx, ctx.workflowId, nextStage || null);
+};
+
+const handleConfirmDialogCancelled = () => {
+  loading.value = false;
+  currentStageHint.value = null;
+  showSlowHint.value = false;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+};
+
 const sendMessage = () => {
   const topic = inputTopic.value.trim();
   if (!topic || loading.value) return;
@@ -122,6 +221,75 @@ const sendMessage = () => {
 
   const activeConv = workflowStore.activeConversation;
   const isFollowUp = activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
+
+  // Phase 2: 阶段确认处理
+  // 当 SSE 推送 stage_state='awaiting_confirmation' 时触发,弹出确认弹窗
+  // 注:handleConfirmDialogConfirmed/cancelled 已在顶层定义,弹窗 emit 后自动处理
+  const onAwaitingConfirmation = (data: any) => {
+    loading.value = false;
+    showSlowHint.value = false;
+    if (slowHintTimer) {
+      clearTimeout(slowHintTimer);
+      slowHintTimer = null;
+    }
+    currentStageHint.value = null;
+    const conv = workflowStore.activeConversation;
+    const ctxAssistantIdx = isFollowUp
+      ? (conv ? conv.messages.length - 1 : 1)
+      : 1;
+    const ctx: ConfirmContext = {
+      workflowId: workflowStore.runningWorkflowId || '',
+      convId: conv ? conv.id : '',
+      assistantIdx: ctxAssistantIdx,
+      stage: data.stage,
+      stageOutput: data.stage_output || {},
+      stageHistoryLength: data.stage_history_length || 0,
+    };
+    workflowStore.showConfirmDialog(ctx);
+  };
+
+  // SSE 回调(精简版,顶层共享 startNextStageStream 处理后续)
+  const streamCallbacks = {
+    onStageStart: (data: any) => {
+      showSlowHint.value = false;
+      if (slowHintTimer) clearTimeout(slowHintTimer);
+      slowHintTimer = setTimeout(() => { showSlowHint.value = true; }, 60000);
+      currentStageHint.value = { icon: data.icon, label: data.label };
+      scrollToBottom();
+    },
+    onStageComplete: (_data: any) => {
+      showSlowHint.value = false;
+      if (slowHintTimer) clearTimeout(slowHintTimer);
+      slowHintTimer = setTimeout(() => { showSlowHint.value = true; }, 60000);
+    },
+    onStageError: (data: any) => {
+      if (slowHintTimer) { clearTimeout(slowHintTimer); slowHintTimer = null; }
+      showSlowHint.value = false;
+      loading.value = false;
+      currentStageHint.value = null;
+      ElMessage.error(`${data.label}失败`);
+    },
+    onCompleted: (data: any) => {
+      if (slowHintTimer) { clearTimeout(slowHintTimer); slowHintTimer = null; }
+      showSlowHint.value = false;
+      currentWorkflowId.value = data.workflow_id || null;
+      loading.value = false;
+      currentStageHint.value = null;
+      scrollToBottom();
+      nextTick(() => {
+        const updatedConv = workflowStore.activeConversation;
+        if (updatedConv) renderChartsForMessages(updatedConv.messages);
+      });
+    },
+    onError: (data: any) => {
+      if (slowHintTimer) { clearTimeout(slowHintTimer); slowHintTimer = null; }
+      showSlowHint.value = false;
+      loading.value = false;
+      currentStageHint.value = null;
+      ElMessage.error(`工作流异常: ${data.error}`);
+    },
+    onAwaitingConfirmation,
+  };
 
   if (isFollowUp) {
     // 追问模式：在当前对话中追加消息
@@ -145,59 +313,12 @@ const sendMessage = () => {
 
     workflowApi.followUp({ message: topic, conversation_history: conversationHistory })
       .then((res) => {
-        workflowStore.startWorkflowStream(activeConv.id, assistantIdx, res.data.workflow_id, {
-          onStageStart: (data) => {
-            showSlowHint.value = false;
-            if (slowHintTimer) clearTimeout(slowHintTimer);
-            slowHintTimer = setTimeout(() => {
-              showSlowHint.value = true;
-            }, 60000);
-            currentStageHint.value = { icon: data.icon, label: data.label };
-            scrollToBottom();
-          },
-          onStageComplete: (_data) => {
-            showSlowHint.value = false;
-            if (slowHintTimer) clearTimeout(slowHintTimer);
-            slowHintTimer = setTimeout(() => {
-              showSlowHint.value = true;
-            }, 60000);
-          },
-          onStageError: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            loading.value = false;
-            currentStageHint.value = null;
-            ElMessage.error(`${data.label}失败`);
-          },
-          onCompleted: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            currentWorkflowId.value = data.workflow_id || null;
-            loading.value = false;
-            currentStageHint.value = null;
-            scrollToBottom();
-            nextTick(() => {
-              const updatedConv = workflowStore.activeConversation;
-              if (updatedConv) renderChartsForMessages(updatedConv.messages);
-            });
-          },
-          onError: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            loading.value = false;
-            currentStageHint.value = null;
-            ElMessage.error(`追问异常: ${data.error}`);
-          },
-        });
+        workflowStore.startWorkflowStream(
+          activeConv.id,
+          assistantIdx,
+          res.data.workflow_id,
+          streamCallbacks,
+        );
       })
       .catch(() => {
         activeConv.messages.pop();
@@ -229,59 +350,12 @@ const sendMessage = () => {
 
     workflowApi.start({ topic, max_items: 5 })
       .then((res) => {
-        workflowStore.startWorkflowStream(conv.id, assistantIdx, res.data.workflow_id, {
-          onStageStart: (data) => {
-            showSlowHint.value = false;
-            if (slowHintTimer) clearTimeout(slowHintTimer);
-            slowHintTimer = setTimeout(() => {
-              showSlowHint.value = true;
-            }, 60000);
-            currentStageHint.value = { icon: data.icon, label: data.label };
-            scrollToBottom();
-          },
-          onStageComplete: (_data) => {
-            showSlowHint.value = false;
-            if (slowHintTimer) clearTimeout(slowHintTimer);
-            slowHintTimer = setTimeout(() => {
-              showSlowHint.value = true;
-            }, 60000);
-          },
-          onStageError: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            loading.value = false;
-            currentStageHint.value = null;
-            ElMessage.error(`${data.label}失败`);
-          },
-          onCompleted: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            currentWorkflowId.value = data.workflow_id || null;
-            loading.value = false;
-            currentStageHint.value = null;
-            scrollToBottom();
-            nextTick(() => {
-              const updatedConv = workflowStore.activeConversation;
-              if (updatedConv) renderChartsForMessages(updatedConv.messages);
-            });
-          },
-          onError: (data) => {
-            if (slowHintTimer) {
-              clearTimeout(slowHintTimer);
-              slowHintTimer = null;
-            }
-            showSlowHint.value = false;
-            loading.value = false;
-            currentStageHint.value = null;
-            ElMessage.error(`工作流异常: ${data.error}`);
-          },
-        });
+        workflowStore.startWorkflowStream(
+          conv.id,
+          assistantIdx,
+          res.data.workflow_id,
+          streamCallbacks,
+        );
 
         showSlowHint.value = false;
         if (slowHintTimer) clearTimeout(slowHintTimer);
@@ -663,6 +737,12 @@ const getStatusBadge = (status: string) => {
         </el-button>
       </div>
     </main>
+
+    <!-- Phase 2: 阶段确认弹窗 -->
+    <StageConfirmDialog
+      @confirmed="handleConfirmDialogConfirmed"
+      @cancelled="handleConfirmDialogCancelled"
+    />
   </div>
   <div v-else class="auth-placeholder">
     <div class="placeholder-inner">

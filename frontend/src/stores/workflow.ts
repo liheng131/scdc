@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { workflowApi } from '../api';
+import { workflowApi, type StageConfirmRequest, type StageConfirmResponse } from '../api';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
@@ -37,6 +37,18 @@ interface StreamCallbacks {
   onStageError?: (data: any) => void;
   onCompleted?: (data: any) => void;
   onError?: (data: any) => void;
+  // Phase 2: 阶段进入 awaiting_confirmation
+  onAwaitingConfirmation?: (data: any) => void;
+}
+
+// Phase 2: 阶段确认弹窗上下文
+export interface ConfirmContext {
+  workflowId: string;
+  convId: string;
+  assistantIdx: number;
+  stage: string;
+  stageOutput: any;          // 后端 stage_output 字段(含 sources 列表)
+  stageHistoryLength: number;
 }
 
 const STORAGE_KEY = 'scdc_workflow_conversations';
@@ -75,6 +87,11 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const activeConvIdForStream = ref<string | null>(null);
   const activeAssistantIdxForStream = ref<number>(-1);
   const streamCallbacks = ref<StreamCallbacks>({});
+
+  // Phase 2: 阶段确认弹窗状态
+  const confirmContext = ref<ConfirmContext | null>(null);
+  const confirmDialogVisible = ref(false);
+  const confirmSubmitting = ref(false);
 
   const activeConversation = computed(() => {
     if (!activeConversationId.value) return null;
@@ -178,6 +195,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
       const data = JSON.parse(e.data);
       if (streamCallbacks.value.onStageComplete) {
         streamCallbacks.value.onStageComplete(data);
+      }
+      // Phase 2: 阶段结束后,如果是 awaiting_confirmation 状态,触发确认弹窗
+      if (data && data.stage_state === 'awaiting_confirmation') {
+        if (streamCallbacks.value.onAwaitingConfirmation) {
+          streamCallbacks.value.onAwaitingConfirmation(data);
+        }
       }
     });
 
@@ -356,6 +379,49 @@ export const useWorkflowStore = defineStore('workflow', () => {
     attachEventSourceListeners(es);
   };
 
+  // Phase 2: 单独启动 collecting 阶段流(confirm 重试用)
+  const startCollectingStream = (convId: string, assistantIdx: number, workflowId: string, callbacks: StreamCallbacks) => {
+    clearEventSource();
+    setupStreamListeners(convId, assistantIdx, callbacks);
+    const streamUrl = workflowApi.getCollectingStreamUrl(workflowId);
+    runningWorkflowId.value = workflowId;
+    const es = new EventSource(streamUrl);
+    eventSource.value = es;
+    attachEventSourceListeners(es);
+  };
+
+  // Phase 2: 显示/隐藏阶段确认弹窗
+  const showConfirmDialog = (ctx: ConfirmContext) => {
+    confirmContext.value = ctx;
+    confirmDialogVisible.value = true;
+  };
+
+  const hideConfirmDialog = () => {
+    confirmDialogVisible.value = false;
+    confirmContext.value = null;
+    confirmSubmitting.value = false;
+  };
+
+  // Phase 2: 调用后端 /confirm 端点
+  // decision='accept' → 后端返回 next_stage='cleaning' + sse_url
+  // decision='reject' → 后端返回 next_stage='collecting' + sse_url
+  // 根据 next_stage 决定是启动完整流(走 cleaning→analyzing→reporting)还是只跑 collecting
+  const confirmStage = async (
+    workflowId: string,
+    body: StageConfirmRequest
+  ): Promise<StageConfirmResponse> => {
+    confirmSubmitting.value = true;
+    try {
+      const res = await workflowApi.confirmStage(workflowId, body);
+      const data = (res.data || res) as unknown as StageConfirmResponse;
+      hideConfirmDialog();
+      return data;
+    } catch (e: any) {
+      confirmSubmitting.value = false;
+      throw e;
+    }
+  };
+
   const clearEventSource = () => {
     if (eventSource.value) {
       eventSource.value.close();
@@ -429,6 +495,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
     eventSource,
     runningWorkflowId,
     isWorkflowRunning,
+    // Phase 2: 阶段确认弹窗
+    confirmContext,
+    confirmDialogVisible,
+    confirmSubmitting,
     setActiveConversation,
     createConversation,
     addMessage,
@@ -438,6 +508,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clearAllConversations,
     resetActiveConversation,
     startWorkflowStream,
+    startCollectingStream,    // Phase 2
+    showConfirmDialog,        // Phase 2
+    hideConfirmDialog,        // Phase 2
+    confirmStage,             // Phase 2
     clearEventSource,
     stopWorkflow,
     loadHistoryFromServer,

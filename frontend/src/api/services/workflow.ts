@@ -35,6 +35,29 @@ export interface WorkflowStatusResponse {
   stages: Record<string, any>;
   result: any;
   error?: string;
+  // Phase 2: 阶段状态机
+  stage_state?: 'running' | 'awaiting_confirmation' | 'completed' | 'failed';
+  stage_output?: any | null;
+  stage_history?: any[] | null;
+}
+
+// Phase 2: Human-in-the-Loop 阶段确认
+export interface StageConfirmRequest {
+  decision: 'accept' | 'reject';
+  user_edits?: {
+    extra_urls?: string[];
+    extra_keywords?: string[];
+  } | null;
+  user_feedback?: string | null;
+}
+
+export interface StageConfirmResponse {
+  workflow_id: string;
+  stage: string;
+  stage_state: string;
+  next_stage: string | null;
+  sse_url: string | null;
+  stage_history_length: number;
 }
 
 export const workflowApi = {
@@ -46,6 +69,21 @@ export const workflowApi = {
   getStreamUrl: (workflowId: string): string => {
     const token = localStorage.getItem('token') || '';
     return `/api/v1/workflow/${workflowId}/stream?token=${encodeURIComponent(token)}`;
+  },
+
+  // Phase 2: 数据采集阶段单独 SSE 流 URL
+  getCollectingStreamUrl: (workflowId: string): string => {
+    const token = localStorage.getItem('token') || '';
+    return `/api/v1/workflow/${workflowId}/stream-collecting?token=${encodeURIComponent(token)}`;
+  },
+
+  // Phase 2: 阶段确认
+  confirmStage: async (
+    workflowId: string,
+    body: StageConfirmRequest
+  ): Promise<ApiResponse<StageConfirmResponse>> => {
+    const res = await apiClient.post(`/api/v1/workflow/${workflowId}/confirm`, body);
+    return res.data;
   },
 
   followUp: async (data: FollowUpRequest): Promise<ApiResponse<FollowUpResponse>> => {
