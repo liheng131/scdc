@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { workflowApi, type StageConfirmRequest, type StageConfirmResponse } from '../api';
+import { workflowApi, type StageConfirmRequest, type StageConfirmResponse, type StageName } from '../api';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
@@ -53,6 +53,8 @@ export interface ConfirmContext {
 
 const STORAGE_KEY = 'scdc_workflow_conversations';
 const ACTIVE_KEY = 'scdc_workflow_active_id';
+// Spec 2: 用户偏好持久化
+const PREFS_KEY = 'scdc_workflow_user_preferences';
 
 const loadConversations = (): Conversation[] => {
   try {
@@ -60,6 +62,15 @@ const loadConversations = (): Conversation[] => {
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
+  }
+};
+
+const loadUserPreferences = (): { skipAllConfirmations: boolean } => {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    return raw ? JSON.parse(raw) : { skipAllConfirmations: false };
+  } catch {
+    return { skipAllConfirmations: false };
   }
 };
 
@@ -92,6 +103,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const confirmContext = ref<ConfirmContext | null>(null);
   const confirmDialogVisible = ref(false);
   const confirmSubmitting = ref(false);
+
+  // Spec 2: 跳过模式状态
+  // skipRemainingForWorkflow: 内存中（本次工作流），存 workflow_id 集合
+  const skipRemainingForWorkflow = ref<Set<string>>(new Set());
+  // userPreferences: 持久化到 localStorage（全局偏好）
+  const userPreferences = ref<{ skipAllConfirmations: boolean }>(loadUserPreferences());
 
   const activeConversation = computed(() => {
     if (!activeConversationId.value) return null;
@@ -390,6 +407,55 @@ export const useWorkflowStore = defineStore('workflow', () => {
     attachEventSourceListeners(es);
   };
 
+  // Spec 2: 通用 stage 启动方法（替代 startCollectingStream，覆盖 4 阶段）
+  // stage ∈ 'collecting' | 'cleaning' | 'analyzing' | 'reporting'
+  const startStageStream = (convId: string, assistantIdx: number, workflowId: string, stage: StageName, callbacks: StreamCallbacks) => {
+    clearEventSource();
+    setupStreamListeners(convId, assistantIdx, callbacks);
+    const streamUrl = workflowApi.getStreamUrlForStage(workflowId, stage);
+    runningWorkflowId.value = workflowId;
+    const es = new EventSource(streamUrl);
+    eventSource.value = es;
+    attachEventSourceListeners(es);
+  };
+
+  // Spec 2: 跳过模式控制
+  const setSkipRemaining = (workflowId: string, on: boolean) => {
+    if (on) {
+      skipRemainingForWorkflow.value.add(workflowId);
+    } else {
+      skipRemainingForWorkflow.value.delete(workflowId);
+    }
+    // 触发响应式更新
+    skipRemainingForWorkflow.value = new Set(skipRemainingForWorkflow.value);
+  };
+
+  const setUserPreference = <K extends keyof typeof userPreferences.value>(
+    key: K,
+    value: typeof userPreferences.value[K]
+  ) => {
+    userPreferences.value[key] = value;
+    // 持久化
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(userPreferences.value));
+    } catch {
+      // ignore quota errors
+    }
+  };
+
+  // Spec 2: 决定是否自动 skip 当前 stage
+  const shouldAutoSkip = (workflowId: string | null): boolean => {
+    if (userPreferences.value.skipAllConfirmations) return true;
+    if (workflowId && skipRemainingForWorkflow.value.has(workflowId)) return true;
+    return false;
+  };
+
+  // Spec 2: 弹窗打开后，清除"本次跳过"标记（避免影响其他工作流）
+  const clearSkipRemaining = (workflowId: string) => {
+    skipRemainingForWorkflow.value.delete(workflowId);
+    skipRemainingForWorkflow.value = new Set(skipRemainingForWorkflow.value);
+  };
+
   // Phase 2: 显示/隐藏阶段确认弹窗
   const showConfirmDialog = (ctx: ConfirmContext) => {
     confirmContext.value = ctx;
@@ -508,10 +574,18 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clearAllConversations,
     resetActiveConversation,
     startWorkflowStream,
-    startCollectingStream,    // Phase 2
+    startCollectingStream,    // Phase 2 (kept for backward compat)
+    startStageStream,         // Spec 2: 通用 stage 启动
     showConfirmDialog,        // Phase 2
     hideConfirmDialog,        // Phase 2
     confirmStage,             // Phase 2
+    // Spec 2: 跳过模式
+    skipRemainingForWorkflow,
+    userPreferences,
+    setSkipRemaining,
+    setUserPreference,
+    shouldAutoSkip,
+    clearSkipRemaining,
     clearEventSource,
     stopWorkflow,
     loadHistoryFromServer,
