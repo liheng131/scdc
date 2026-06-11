@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import get_current_active_user, get_current_active_user_sse
 from app.models.user import User
 from app.api.responses import success_response, ResponseModel
-from app.services.workflow import workflow_service
+from app.services.workflow import workflow_service, STAGE_SEQUENCE
 from app.core.runtime_config import rumtime_config
 
 router = APIRouter()
@@ -99,6 +99,11 @@ async def start_workflow(
             max_items=0,
             dimensions=[],
             use_rag=effective_use_rag,
+            # Phase 7 修复:direct 也设置 initial_stage="collecting",
+            # 这样 _create_stage_stream_response 的 current_stage 校验能通过。
+            # 直答流在 _create_stage_stream_response 内通过 is_direct_response 标记
+            # 走 run_direct_response_stream(),而不是 run_stage_only_stream()
+            initial_stage="collecting",
         )
         state.is_direct_response = True
         return success_response(data={
@@ -108,17 +113,20 @@ async def start_workflow(
         })
 
     if decision.action == "reentry":
+        # 校验 target_stage,失败回退到 collecting(防御 LLM 误判)
+        target_stage = decision.target_stage if decision.target_stage in STAGE_SEQUENCE else "collecting"
         state = await workflow_service.create_workflow(
             topic=req.topic,
             max_items=req.max_items,
             dimensions=req.dimensions,
             use_rag=effective_use_rag,
+            initial_stage=target_stage,
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
             "topic": state.topic,
             "intent_type": decision.intent_type,
-            "target_stage": decision.target_stage,
+            "target_stage": target_stage,
             "user_feedback": decision.user_feedback or "",
         })
 
@@ -128,6 +136,7 @@ async def start_workflow(
         max_items=req.max_items,
         dimensions=req.dimensions,
         use_rag=effective_use_rag,
+        initial_stage="collecting",  # 起始阶段:前端 stream-collecting 端点可立即启动
     )
     return success_response(data={
         "workflow_id": state.workflow_id,
@@ -155,6 +164,7 @@ async def follow_up_workflow(
             dimensions=["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"],
             conversation_history=req.conversation_history,
             use_rag=effective_use_rag,
+            initial_stage="collecting",
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
@@ -163,18 +173,20 @@ async def follow_up_workflow(
         })
 
     if decision.action == "reentry":
+        target_stage = decision.target_stage if decision.target_stage in STAGE_SEQUENCE else "collecting"
         state = await workflow_service.create_workflow(
             topic=req.message,
             max_items=5,
             dimensions=[],
             conversation_history=req.conversation_history,
             use_rag=effective_use_rag,
+            initial_stage=target_stage,
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
             "topic": state.topic,
             "intent_type": decision.intent_type,
-            "target_stage": decision.target_stage,
+            "target_stage": target_stage,
             "user_feedback": decision.user_feedback or "",
         })
 
@@ -185,6 +197,8 @@ async def follow_up_workflow(
         dimensions=[],
         conversation_history=req.conversation_history,
         use_rag=effective_use_rag,
+        # Phase 7 修复:同 /start direct 分支,设置 initial_stage="collecting" 让校验通过
+        initial_stage="collecting",
     )
     state.is_direct_response = True
     return success_response(data={
@@ -223,11 +237,34 @@ def _create_stage_stream_response(state, stage: str) -> StreamingResponse:
     1. 校验 workflow 存在
     2. 校验 state.stage_state == 'running' && state.current_stage == stage
     3. 委托 workflow_service.run_stage_only_stream(state, stage)
+
+    Phase 7 修复:如果 state 是直答工作流（is_direct_response=True）,
+        即使 current_stage 校验通过,也走 run_direct_response_stream 而非
+        run_stage_only_stream。前端的 stream-{stage} 端点对两类都开放,
+        让前端不必区分 SSE URL。
     """
     if state.stage_state != "running":
         async def err_gen():
             yield f"event: error\ndata: {{\"error\": \"Workflow is not in 'running' state (current: {state.stage_state})\"}}\n\n"
         return StreamingResponse(err_gen(), media_type="text/event-stream")
+
+    # 直答工作流:走 run_direct_response_stream,产生 direct_response / direct_response_done 事件
+    # 前端在 workflow.ts 已有对应 handler
+    if getattr(state, "is_direct_response", False):
+        return StreamingResponse(
+            workflow_service.run_direct_response_stream(
+                state.topic,
+                conversation_history=state.conversation_history,
+                use_rag=state.use_rag,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     if state.current_stage != stage:
         async def err_gen():
             yield f"event: error\ndata: {{\"error\": \"Workflow current_stage is '{state.current_stage}', requested '{stage}'\"}}\n\n"

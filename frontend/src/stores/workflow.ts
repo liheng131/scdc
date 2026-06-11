@@ -340,12 +340,21 @@ export const useWorkflowStore = defineStore('workflow', () => {
     });
 
     es.addEventListener('error', (e: any) => {
+      // Phase 7: 区分服务端命名 error 事件 vs 浏览器内部 error
+      // - e.data 有值 → 服务端显式发了 `event: error\ndata: {...}`,应当展示给用户
+      // - e.data 为空 → EventSource 自身的连接抖动(自动重连中),不应立即报错
+      //   这种情况让 onerror 处理最终状态,这里只记日志
+      if (!e.data) {
+        console.warn('[SSE] Browser-internal error (likely auto-reconnect in progress)');
+        return;
+      }
       isStreamFinished.value = true;
       let parsedData: any = null;
       try {
         parsedData = JSON.parse(e.data);
       } catch {
-        parsedData = { error: '连接异常' };
+        // 服务端发了非 JSON 的 error 命名事件
+        parsedData = { error: `服务流异常: ${e.data}` };
       }
 
       if (streamCallbacks.value.onError) {
@@ -376,12 +385,23 @@ export const useWorkflowStore = defineStore('workflow', () => {
       clearEventSource();
     });
 
+    // 浏览器内部 error 事件的兜底:延迟判定是否真的连不上
+    // EventSource 自动重连有节奏(~3s),CLOSED 状态才算"彻底断开"
     es.onerror = () => {
       if (runningWorkflowId.value && !isStreamFinished.value) {
-        if (streamCallbacks.value.onError) {
-          streamCallbacks.value.onError({ error: 'SSE 连接已断开' });
+        const es = eventSource.value;
+        const readyState = es?.readyState;
+        // 0=CONNECTING 1=OPEN 2=CLOSED
+        // OPEN/CONNECTING 状态下 onerror 触发 = 瞬态抖动,EventSource 正在自动重连,静默
+        // CLOSED 状态下 = EventSource 已放弃,才是真断开
+        if (readyState === 2 /* CLOSED */) {
+          if (streamCallbacks.value.onError) {
+            streamCallbacks.value.onError({ error: 'SSE 连接已断开(已停止重连)' });
+          }
+          clearEventSource();
+        } else {
+          console.warn('[SSE] onerror fired, readyState=', readyState, ', waiting for auto-reconnect');
         }
-        clearEventSource();
       }
     };
   };

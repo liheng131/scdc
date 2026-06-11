@@ -40,8 +40,19 @@ const suggestions = [
   '中国SaaS行业投资机会',
 ];
 
-onMounted(() => {
-  workflowStore.loadHistoryFromServer();
+onMounted(async () => {
+  // 先验证 token 有效性(若 stale → fetchCurrentUser 内部已 logout,isAuthenticated 变 false)
+  // 避免带 stale token 去打 history/list 接口,导致 401 + 工作流异常提示
+  if (auth.token) {
+    try {
+      await auth.fetchCurrentUser();
+    } catch {
+      // fetchCurrentUser 内部已处理 logout,这里静默
+    }
+  }
+  if (auth.isAuthenticated) {
+    workflowStore.loadHistoryFromServer();
+  }
 });
 
 onUnmounted(() => {
@@ -261,6 +272,11 @@ const startNextStageStream = (
 
 const handleConfirmDialogConfirmed = (data: { ctx: ConfirmContext; response: any; decision: 'accept' | 'reject' }) => {
   const { ctx, response } = data;
+  // 防御性兜底:dialog 内部 race condition 偶尔会让 ctx 为 null(理论上已修,这里双保险)
+  if (!ctx) {
+    console.warn('[handleConfirmDialogConfirmed] ctx is null, abort next-stage stream');
+    return;
+  }
   const nextStage = response?.next_stage as string | null | undefined;
   loading.value = true;
   showSlowHint.value = false;
@@ -298,6 +314,27 @@ const sendMessage = () => {
   showSlowHint.value = false;
 
   const activeConv = workflowStore.activeConversation;
+  // Phase 7 修复:3 态分支,避免用户点击"待开始"对话后被强制新建
+  //   - 无活动对话（点过"新建对话"）→ 走新建分支
+  //   - 活动对话是 idle/empty（点过侧边栏一个还没开始过的对话）→ 复用它,不要新建
+  //   - 活动对话 completed 且有消息 → 追问
+  //   - 活动对话 running/failed → 新建（避免和正在跑的 SSE 流冲撞,旧 conv 保留作为历史）
+  // Phase 7 增强:即使用户没点过侧边栏（停留在 welcome 屏）且 activeConv=null,
+  //   也要复用最近的 idle conv,解决"凭空冒出一堆同名空对话"问题
+  //   - 找:conversations 列表里 status='idle' 且 messages=[] 的最新一条
+  //   - 没找到:首次使用 / 列表里只有 running/failed/completed → 走真新建
+  const reuseFromList: Conversation | null = !activeConv
+    ? workflowStore.conversations.find(c => c.messages.length === 0 && c.status === 'idle') || null
+    : null;
+  // 真正的"待复用对话":优先 activeConv（已选中）> 列表里最近的 idle conv
+  const targetConv: Conversation | null = (() => {
+    if (activeConv) {
+      if (activeConv.messages.length === 0 && activeConv.status === 'idle') return activeConv;
+      return null; // activeConv 处于其他状态,sendMessage 走其他分支(followup/new)
+    }
+    return reuseFromList; // activeConv=null 时 fallback 到列表里的 idle conv
+  })();
+  const isIdleEmpty = !!targetConv; // 复用分支条件:有可复用的目标对话
   const isFollowUp = !!activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
 
   inputTopic.value = '';
@@ -340,6 +377,53 @@ const sendMessage = () => {
         }
         showSlowHint.value = false;
         ElMessage.error('追问失败，请重试');
+        loading.value = false;
+      });
+  } else if (isIdleEmpty && targetConv) {
+    // 复用分支:用户在侧边栏点了一个待开始的空对话,或停留在 welcome 屏输主题
+    // → 直接在那个 idle conv 里启动分析,避免凭空创建新对话
+    // 优先用 activeConv(已选中),否则用 reuseFromList 找出的最近 idle conv
+    if (!activeConv) {
+      // welcome 屏路径:需要把目标 conv 设为 active,这样 UI 会从 welcome 屏切走
+      workflowStore.setActiveConversation(targetConv.id);
+    }
+    targetConv.messages.push({ role: 'user', content: topic });
+    targetConv.messages.push({
+      role: 'assistant',
+      content: '',
+      reportMarkdown: '',
+      chartOptions: [],
+    });
+    targetConv.status = 'running';
+
+    const assistantIdx = 1;
+    const cbs = buildStreamCallbacks(targetConv.id, assistantIdx, isFollowUp);
+
+    workflowApi.start({ topic, max_items: 5 })
+      .then((res) => {
+        workflowStore.startStageStream(
+          targetConv.id,
+          assistantIdx,
+          res.data.workflow_id,
+          'collecting',
+          cbs,
+        );
+
+        showSlowHint.value = false;
+        if (slowHintTimer) clearTimeout(slowHintTimer);
+        slowHintTimer = setTimeout(() => {
+          showSlowHint.value = true;
+        }, 60000);
+      })
+      .catch(() => {
+        targetConv.messages.pop();
+        targetConv.status = 'idle';
+        if (slowHintTimer) {
+          clearTimeout(slowHintTimer);
+          slowHintTimer = null;
+        }
+        showSlowHint.value = false;
+        ElMessage.error('启动分析失败，请检查后端服务');
         loading.value = false;
       });
   } else {

@@ -58,57 +58,36 @@ apiClient.interceptors.request.use(
 );
 
 /**
- * 401 处理防抖标志：防止多个并发 401 响应同时触发登出逻辑
- * 当第一个 401 进入后设置为 true，后续 401 直接跳过
- * 3 秒后自动重置，允许下一次独立的 401 事件正常处理
+ * 401 处理:统一在 401 时清掉 token + logout + 提示。
  *
- * 改进：401 不再立即清除 token 和登出，而是：
- * 1. 先检查 localStorage 中是否仍存在有效 token
- * 2. 如果 token 存在，可能是后端临时问题（如数据库连接失败）
- *    只记录错误日志，不清除 token
- * 3. 如果 token 不存在，才是真正的未认证状态
+ * 旧版"保留 token 仅警告"逻辑会导致 stale token 一直挂在 localStorage,
+ * 后续每次 API 调用都 401,UI 看到 avatar 仍在但实际啥也干不了。
+ *
+ * 改进:任何业务 401 一律当作 token 失效处理,让 AuthModal 自然浮现让用户重登。
  */
-let isHandling401 = false;
-let handling401Timer: ReturnType<typeof setTimeout> | null = null;
-
+let last401HandledAt = 0;
 function handle401(requestUrl?: string) {
-  if (isHandling401) {
+  // 简易防抖:3 秒内多次 401 只处理一次
+  const now = Date.now();
+  if (now - last401HandledAt < 3000) {
     return;
   }
-  isHandling401 = true;
-  if (handling401Timer) {
-    clearTimeout(handling401Timer);
-  }
-  handling401Timer = setTimeout(() => {
-    isHandling401 = false;
-    handling401Timer = null;
-  }, 3000);
+  last401HandledAt = now;
 
-  // 详细日志：记录 401 错误发生时的上下文
-  const existingToken = localStorage.getItem('token');
-  console.warn('[401 Auth Error]', {
+  console.warn('[401 Auth Error] clearing stale token', {
     url: requestUrl,
-    hasLocalToken: !!existingToken,
     timestamp: new Date().toISOString(),
   });
 
-  // 关键改进：只有当 localStorage 中确实没有 token 时，才是真正的未认证
-  // 如果有 token，说明可能是后端认证服务临时问题（如数据库连接失败），不应登出
-  if (!existingToken) {
-    // 真正的未认证状态：清理残留数据（如有）并提示
-    localStorage.removeItem('user');
-    ElMessage.error('登录凭证已过期或未授权，请重新登录');
-    try {
-      useAuthStore().logout();
-    } catch {
-      // store 尚未初始化或 pinia 不可用，静默忽略
-    }
-  } else {
-    // 有 token 但返回 401：可能是后端认证服务问题
-    // 不清除 token，只提示用户，让用户有机会重试
-    ElMessage.warning(`认证服务暂时不可用（${requestUrl || 'API'}），请重试或稍后再操作`);
-    // 不调用 logout()，保持登录状态
+  // 主动清 token + user
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  try {
+    useAuthStore().logout();
+  } catch {
+    // store 尚未初始化或 pinia 不可用,静默忽略
   }
+  ElMessage.error('登录凭证已过期,请重新登录');
 }
 
 apiClient.interceptors.response.use(

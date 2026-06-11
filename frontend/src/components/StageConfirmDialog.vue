@@ -122,15 +122,18 @@ const buildRejectBody = (): StageConfirmRequest => {
 
 const handleAccept = async () => {
   if (!ctx.value) return;
+  // 快照:confirmStage 内部 hideConfirmDialog 会把 confirmContext.value 置为 null,
+  // await 之后 ctx.value 已不可靠,需在请求前固定引用
+  const ctxSnapshot = ctx.value;
   const body: StageConfirmRequest = { decision: 'accept' };
   try {
     // Spec 2: 本次剩余阶段跳过模式
-    if (skipRemaining.value && ctx.value.workflowId) {
-      store.setSkipRemaining(ctx.value.workflowId, true);
+    if (skipRemaining.value && ctxSnapshot.workflowId) {
+      store.setSkipRemaining(ctxSnapshot.workflowId, true);
     }
-    const resp = await store.confirmStage(ctx.value.workflowId, body);
+    const resp = await store.confirmStage(ctxSnapshot.workflowId, body);
     ElMessage.success('已接受，进入下一阶段');
-    emit('confirmed', { ctx: ctx.value, response: resp, decision: 'accept' });
+    emit('confirmed', { ctx: ctxSnapshot, response: resp, decision: 'accept' });
   } catch (e: any) {
     const msg = e?.response?.data?.detail || e?.message || '操作失败';
     ElMessage.error(`接受失败: ${msg}`);
@@ -143,10 +146,12 @@ const handleReject = async () => {
     ElMessage.warning('请至少补充一项内容再重试');
     return;
   }
+  // 快照:同上,避免 await 期间 ctx 被置 null
+  const ctxSnapshot = ctx.value;
   try {
-    const resp = await store.confirmStage(ctx.value.workflowId, buildRejectBody());
+    const resp = await store.confirmStage(ctxSnapshot.workflowId, buildRejectBody());
     ElMessage.info('已重试，AI 正在重新执行...');
-    emit('confirmed', { ctx: ctx.value, response: resp, decision: 'reject' });
+    emit('confirmed', { ctx: ctxSnapshot, response: resp, decision: 'reject' });
   } catch (e: any) {
     const msg = e?.response?.data?.detail || e?.message || '操作失败';
     ElMessage.error(`重试失败: ${msg}`);
@@ -174,13 +179,15 @@ const handleCloseAttempt = () => {
     .then(async () => {
       // 等价 accept
       if (ctx.value) {
-        if (skipRemaining.value && ctx.value.workflowId) {
-          store.setSkipRemaining(ctx.value.workflowId, true);
+        // 快照:同上,避免 await 期间 ctx 被置 null
+        const ctxSnapshot = ctx.value;
+        if (skipRemaining.value && ctxSnapshot.workflowId) {
+          store.setSkipRemaining(ctxSnapshot.workflowId, true);
         }
         try {
-          const resp = await store.confirmStage(ctx.value.workflowId, { decision: 'accept' });
+          const resp = await store.confirmStage(ctxSnapshot.workflowId, { decision: 'accept' });
           ElMessage.success('已接受，进入下一阶段');
-          emit('confirmed', { ctx: ctx.value, response: resp, decision: 'accept' });
+          emit('confirmed', { ctx: ctxSnapshot, response: resp, decision: 'accept' });
         } catch (e: any) {
           const msg = e?.response?.data?.detail || e?.message || '操作失败';
           ElMessage.error(`接受失败: ${msg}`);

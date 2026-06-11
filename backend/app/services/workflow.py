@@ -119,11 +119,30 @@ class WorkflowService:
         ):
             yield chunk
 
-    async def create_workflow(self, topic: str, max_items: int, dimensions: list = None, conversation_history: list = None, use_rag: bool = False) -> WorkflowState:
+    async def create_workflow(
+        self,
+        topic: str,
+        max_items: int,
+        dimensions: list = None,
+        conversation_history: list = None,
+        use_rag: bool = False,
+        initial_stage: Optional[str] = None,
+    ) -> WorkflowState:
+        """创建工作流。
+
+        Args:
+            initial_stage: 起始阶段。`orchestrate` 传 'collecting'、`reentry` 传 target_stage、
+                `direct_response` 传 None。设置后 SSE 流端点 (stream-collecting/cleaning/...)
+                才能通过 `state.current_stage == stage` 校验并开始流式推送。
+        """
         wf_id = str(uuid.uuid4())[:8]
         if dimensions is None:
             dimensions = []
         state = WorkflowState(wf_id, topic, max_items, dimensions, conversation_history, use_rag=use_rag)
+        if initial_stage:
+            state.current_stage = initial_stage
+            # 进入 running 状态机,准备流式执行
+            state.status = "running"
         self._workflows[wf_id] = state
 
         try:
@@ -131,8 +150,8 @@ class WorkflowService:
                 wf_run = WorkflowRun(
                     workflow_id=wf_id,
                     topic=topic,
-                    status="idle",
-                    current_stage="",
+                    status=state.status,
+                    current_stage=state.current_stage,
                     stages_json=json.dumps({}),
                     stage_state=StageState.RUNNING,  # Phase 2: 初始 running
                     stage_output=None,

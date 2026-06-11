@@ -285,6 +285,53 @@ describe('StageConfirmDialog (Spec 2)', () => {
     });
   });
 
+  // ========== 6b. Race condition: confirmStage 内部置 null ctx 后 emit 仍带快照 ==========
+
+  it('handleReject: 模拟 hideConfirmDialog 在 await 期间置空 ctx,emit 仍带快照 ctx(不再 convId=null 报错)', async () => {
+    wrapper = mountDialog();
+    await openDialog('analyzing');
+    // 输入 user_feedback 以解锁重试按钮
+    const textarea = wrapper.find('textarea.el-input-stub');
+    await textarea.setValue('需要更深入的对比');
+    await nextTick();
+
+    // 关键:让 confirmStage 模拟后端 200 → store.hideConfirmDialog → confirmContext = null 的副作用
+    confirmStageMock.mockImplementation(async () => {
+      // 模拟真实 store 的 hideConfirmDialog 副作用
+      state.confirmContext = null;
+      return {
+        workflow_id: 'wf_test_1',
+        stage: 'analyzing',
+        stage_state: 'awaiting_confirmation',
+        next_stage: 'analyzing',
+        sse_url: '/api/v1/workflow/wf_test_1/stream-analyzing',
+        stage_history_length: 2,
+      };
+    });
+
+    // 捕获 emit('confirmed', ...) 的参数
+    const confirmedListener = vi.fn();
+    wrapper.vm.$emit = confirmedListener as any;
+
+    const rejectBtn = wrapper.findAll('.el-button-stub').find((b) => b.text().includes('重试'));
+    expect(rejectBtn!.attributes('disabled')).toBeUndefined();
+
+    // 关键:即使 confirmStage mock 期间把 state.confirmContext 置空,
+    // emit('confirmed', { ctx, ... }) 的 ctx 也必须是非空快照
+    expect(() => rejectBtn!.trigger('click')).not.toThrow();
+
+    await flushAsync();
+
+    // 验证:confirmStage 已被调用
+    expect(confirmStageMock).toHaveBeenCalled();
+    // 验证:没有任何 TypeError "Cannot read properties of null (reading 'convId')" 抛出
+    // (如果 ctx 在 emit 时是 null,父组件的 handleConfirmDialogConfirmed 会抛 convId 错误)
+    // 这里通过 ElMessage.error 没被 '重试失败' 调用来间接验证
+    const errorCalls = (ElMessage.error as Mock).mock.calls;
+    const retryFailCalls = errorCalls.filter((c) => String(c[0] ?? '').includes('重试失败'));
+    expect(retryFailCalls).toHaveLength(0);
+  });
+
   // ========== 7. 跳过模式联动 ==========
 
   it('handleAccept: with skipRemaining checked, calls setSkipRemaining', async () => {

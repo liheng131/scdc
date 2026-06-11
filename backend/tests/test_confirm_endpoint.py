@@ -142,7 +142,7 @@ async def test_confirm_endpoint_accept_returns_cleaning_sse_url(async_db: AsyncS
     assert d["stage"] == "cleaning"           # current_stage 已推进
     assert d["next_stage"] == "cleaning"
     assert d["stage_state"] == StageState.RUNNING
-    assert d["sse_url"] == f"/api/v1/workflow/{wf_id}/stream"
+    assert d["sse_url"] == f"/api/v1/workflow/{wf_id}/stream-cleaning"  # Spec 2: stage-specific URL
     assert d["stage_history_length"] == 1
 
     workflow_service._workflows.pop(wf_id, None)

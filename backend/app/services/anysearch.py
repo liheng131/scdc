@@ -86,14 +86,16 @@ class AnySearchService:
         """
         构造 AnySearch 请求体。
 
-        为什么暂不传 time_range / categories：
-        - 用户提供的 curl 示例未包含这些字段
-        - 先保守只传 query + max_results，避免未知字段被 API 拒绝
-        - 后续根据 API 实际支持的字段再扩展
+        为什么只请求 web 类型而不带 doc：
+        - 之前的 payload 会让 AnySearch 顺手把 PDF / docx 等"文档型"结果也带回来
+        - 这些 doc 链接的 Content-Type 不是 text/html,crawler 当 HTML 抓后用 utf-8 解码二进制
+          会得到 `%PDF-1.3 % 10 obj <> endobj ...` 这种乱码进入 LLM 上下文
+        - 显式限定 content_types=["web"] 可在源头避免
         """
         return {
             "query": request.query,
             "max_results": self.default_max_results,
+            "content_types": ["web"],
         }
 
     async def _do_request(self, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
