@@ -60,8 +60,9 @@ class ConfirmStageRequest(BaseModel):
         user_edits  非空 → 与原 topic 合并后重跑
         user_feedback 非空 → AI 解析后调整策略重跑
         两者都为空 → 完全重跑
+    decision=skip → 不看预览直接接受，进入下一阶段（不计入重试）
     """
-    decision: Literal["accept", "reject"]
+    decision: Literal["accept", "reject", "skip"]
     user_edits: Optional[dict] = Field(
         default=None,
         description="用户编辑（如 extra_urls/extra_keywords）",
@@ -323,6 +324,47 @@ async def get_workflow_status(
     })
 
 
+class WorkflowStatusResponse(BaseModel):
+    """Spec 2: 轻量化的 workflow 状态查询，用于页面刷新后恢复确认弹窗。
+
+    与 /{workflow_id} 不同：只返回弹窗恢复所需的关键字段，不返 history 详情（节省带宽）。
+    """
+    workflow_id: str
+    stage: str
+    stage_state: str
+    stage_output: Optional[dict] = None
+    stage_history_length: int = 0
+    sse_url: Optional[str] = None  # 建议的下一阶段 SSE URL（仅 running 状态）
+
+
+@router.get("/{workflow_id}/status", response_model=ResponseModel)
+async def get_workflow_status_lightweight(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Spec 2: 轻量化的 workflow 状态查询端点。
+
+    用途: 用户刷新页面后，前端用此端点查 stage_output + stage_state，决定是否恢复确认弹窗。
+    """
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+    # 建议的下一阶段 SSE URL
+    sse_url: Optional[str] = None
+    if state.stage_state == "running" and state.current_stage in ("collecting", "cleaning", "analyzing", "reporting"):
+        sse_url = f"/api/v1/workflow/{workflow_id}/stream-{state.current_stage}"
+
+    return success_response(data={
+        "workflow_id": state.workflow_id,
+        "stage": state.current_stage,
+        "stage_state": state.stage_state,
+        "stage_output": state.stage_output,
+        "stage_history_length": len(state.stage_history),
+        "sse_url": sse_url,
+    })
+
+
 @router.post("/{workflow_id}/confirm")
 async def confirm_stage(
     workflow_id: str,
@@ -345,12 +387,10 @@ async def confirm_stage(
         user_feedback=req.user_feedback,
     )
 
-    # 构造新 SSE 流 URL
+    # 构造新 SSE 流 URL（Spec 2: 4 阶段都要路由）
     next_stage = result.get("next_stage")
-    if next_stage == "cleaning":
-        sse_url = f"/api/v1/workflow/{workflow_id}/stream"  # 走完整 run_workflow_stream
-    elif next_stage == "collecting":
-        sse_url = f"/api/v1/workflow/{workflow_id}/stream-collecting"  # 重跑 collecting
+    if next_stage and next_stage in ("collecting", "cleaning", "analyzing", "reporting"):
+        sse_url = f"/api/v1/workflow/{workflow_id}/stream-{next_stage}"
     else:
         sse_url = None  # completed
 

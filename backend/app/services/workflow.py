@@ -644,13 +644,15 @@ class WorkflowService:
     async def confirm_stage(self, state: WorkflowState, decision: str,
                             user_edits: Optional[dict] = None,
                             user_feedback: Optional[str] = None) -> Dict[str, Any]:
-        """Spec 1: 处理用户阶段确认。
+        """Spec 1+2: 处理用户阶段确认。
 
         状态机：
         - 当前 stage_state 必须 == 'awaiting_confirmation'，否则 409
-        - decision='accept': stage_state='running'，下一阶段用 run_workflow_stream 启动
-        - decision='reject': stage_state='running'，重跑当前阶段
-        - 重试次数 = len(stage_history)，> MAX_RETRY_PER_STAGE → 429
+        - decision='accept': stage_state='running'，进入下一阶段
+        - decision='reject': stage_state='running'，重跑当前阶段（带 user_edits 合并）
+        - decision='skip': 等价 accept，但 user_edits/user_feedback 都忽略（不看预览直接过）
+        - 重试次数 = len(stage_history) 中 reject 计数 > MAX_RETRY_PER_STAGE → 429
+          （accept 和 skip 不计入重试）
         """
         if state.stage_state != StageState.AWAITING_CONFIRMATION:
             raise HTTPException(
@@ -659,10 +661,10 @@ class WorkflowService:
                        f"expected '{StageState.AWAITING_CONFIRMATION}'",
             )
 
-        if decision not in ("accept", "reject"):
+        if decision not in ("accept", "reject", "skip"):
             raise HTTPException(status_code=422, detail=f"Invalid decision: {decision}")
 
-        # 重试次数检查
+        # 重试次数检查（仅 reject 受限）
         if decision == "reject" and len(state.stage_history) >= MAX_RETRY_PER_STAGE:
             raise HTTPException(
                 status_code=429,
@@ -680,7 +682,9 @@ class WorkflowService:
         state.stage_history.append(history_entry)
 
         # 决定下一阶段
-        if decision == "accept":
+        if decision in ("accept", "skip"):
+            # accept 和 skip 行为一致：进入下一阶段
+            # 区别仅在 history 记录（skip 不带 user_edits）
             current_idx = STAGE_SEQUENCE.index(state.current_stage) if state.current_stage in STAGE_SEQUENCE else -1
             if current_idx < 0 or current_idx >= len(STAGE_SEQUENCE) - 1:
                 # 已经在 reporting 阶段（理论上不应该，但兜底）
