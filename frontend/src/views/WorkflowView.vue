@@ -109,122 +109,11 @@ const handleStop = () => {
   currentStageHint.value = null;
 };
 
-// Phase 2: 阶段确认后续流转
-// accept → next_stage='cleaning' → 启动完整流(走 cleaning→analyzing→reporting)
-// reject → next_stage='collecting' → 启动 collecting-only 流
-const startNextStageStream = (
-  convId: string,
-  assistantIdx: number,
-  workflowId: string,
-  nextStage: string | null,
-) => {
-  if (!nextStage) {
-    // completed
-    return;
-  }
-  // 阶段提示图标映射
-  const stageIcon: Record<string, string> = {
-    collecting: '🔍',
-    cleaning: '🧹',
-    analyzing: '🧠',
-    reporting: '📝',
-  };
-  // 启动阶段流(这里使用空 callbacks,因为我们走的是新一轮流,
-  // 实际项目里可以把现在 buildStreamCallbacks 抽到顶层共用)
-  // 简化:仅做最小实现,后续 Phase 3.5 再抽象
-  const minimalCallbacks = {
-    onStageStart: (data: any) => {
-      currentStageHint.value = { icon: data.icon, label: data.label };
-      scrollToBottom();
-    },
-    onStageError: (data: any) => {
-      loading.value = false;
-      currentStageHint.value = null;
-      ElMessage.error(`${data.label}失败`);
-    },
-    onCompleted: (data: any) => {
-      currentWorkflowId.value = data.workflow_id || null;
-      loading.value = false;
-      currentStageHint.value = null;
-      scrollToBottom();
-      nextTick(() => {
-        const updatedConv = workflowStore.activeConversation;
-        if (updatedConv) renderChartsForMessages(updatedConv.messages);
-      });
-    },
-    onError: (data: any) => {
-      loading.value = false;
-      currentStageHint.value = null;
-      ElMessage.error(`工作流异常: ${data.error}`);
-    },
-  };
-  // 这里 onAwaitingConfirmation 暂以极简方式重新挂回去
-  const cbWithConfirm = {
-    ...minimalCallbacks,
-    onAwaitingConfirmation: (data: any) => {
-      loading.value = false;
-      currentStageHint.value = null;
-      const ctx: ConfirmContext = {
-        workflowId: workflowStore.runningWorkflowId || workflowId,
-        convId,
-        assistantIdx,
-        stage: data.stage,
-        stageOutput: data.stage_output || {},
-        stageHistoryLength: data.stage_history_length || 0,
-      };
-      workflowStore.showConfirmDialog(ctx);
-    },
-  };
-  void stageIcon; // 占位保留
-  if (nextStage === 'collecting') {
-    workflowStore.startCollectingStream(convId, assistantIdx, workflowId, cbWithConfirm);
-  } else {
-    // cleaning/analyzing/reporting → 走完整流
-    workflowStore.startWorkflowStream(convId, assistantIdx, workflowId, cbWithConfirm);
-  }
-};
-
-const handleConfirmDialogConfirmed = (data: { ctx: ConfirmContext; response: any; decision: 'accept' | 'reject' }) => {
-  const { ctx, response } = data;
-  const nextStage = response?.next_stage as string | null | undefined;
-  // 重新进入 loading 状态
-  loading.value = true;
-  showSlowHint.value = false;
-  if (slowHintTimer) {
-    clearTimeout(slowHintTimer);
-    slowHintTimer = null;
-  }
-  startNextStageStream(ctx.convId, ctx.assistantIdx, ctx.workflowId, nextStage || null);
-};
-
-const handleConfirmDialogCancelled = () => {
-  loading.value = false;
-  currentStageHint.value = null;
-  showSlowHint.value = false;
-  if (slowHintTimer) {
-    clearTimeout(slowHintTimer);
-    slowHintTimer = null;
-  }
-};
-
-const sendMessage = () => {
-  const topic = inputTopic.value.trim();
-  if (!topic || loading.value) return;
-
-  workflowStore.clearEventSource();
-  currentStageHint.value = null;
-  if (slowHintTimer) {
-    clearTimeout(slowHintTimer);
-    slowHintTimer = null;
-  }
-  showSlowHint.value = false;
-
-  const activeConv = workflowStore.activeConversation;
-  const isFollowUp = activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
-
-  // Phase 2: 阶段确认处理
-  // 当 SSE 推送 stage_state='awaiting_confirmation' 时触发,弹出确认弹窗
-  // 注:handleConfirmDialogConfirmed/cancelled 已在顶层定义,弹窗 emit 后自动处理
+// Phase 2 + Spec 2: 阶段确认后续流转
+// accept → next_stage=X → 启动 X 阶段 SSE 流（4 阶段都走 stage-specific 端点）
+// reject → next_stage=current_stage → 启动当前阶段 SSE 流
+// Spec 2 跳过: shouldAutoSkip 命中 → 不弹窗，自动 confirm with decision='skip'
+const buildStreamCallbacks = (convId: string, assistantIdx: number, isFollowUp: boolean) => {
   const onAwaitingConfirmation = (data: any) => {
     loading.value = false;
     showSlowHint.value = false;
@@ -233,13 +122,51 @@ const sendMessage = () => {
       slowHintTimer = null;
     }
     currentStageHint.value = null;
+
     const conv = workflowStore.activeConversation;
     const ctxAssistantIdx = isFollowUp
       ? (conv ? conv.messages.length - 1 : 1)
-      : 1;
+      : assistantIdx;
+    const wfId = workflowStore.runningWorkflowId || '';
+
+    // Spec 2: 跳过模式检查
+    if (workflowStore.shouldAutoSkip(wfId)) {
+      // 不弹窗，自动 skip
+      workflowApi.confirmStage(wfId, { decision: 'skip' })
+        .then((resp) => {
+          const nextStage = (resp.data as any)?.next_stage || null;
+          // 紧接着启动下一阶段
+          if (nextStage) {
+            // 立即递归调用下一阶段流（保持 loading）
+            loading.value = true;
+            currentStageHint.value = { icon: stageIconFor(nextStage), label: stageLabelFor(nextStage) };
+            scrollToBottom();
+            // 使用宏任务让 UI 有机会更新提示
+            setTimeout(() => {
+              workflowStore.startStageStream(
+                conv ? conv.id : convId,
+                ctxAssistantIdx,
+                wfId,
+                nextStage as any,
+                buildStreamCallbacks(conv ? conv.id : convId, ctxAssistantIdx, isFollowUp)
+              );
+            }, 100);
+          } else {
+            ElMessage.info('已自动接受所有阶段，工作流完成');
+          }
+        })
+        .catch((e: any) => {
+          const msg = e?.response?.data?.detail || e?.message || '自动跳过失败';
+          ElMessage.error(msg);
+          loading.value = false;
+        });
+      return;
+    }
+
+    // 正常弹窗
     const ctx: ConfirmContext = {
-      workflowId: workflowStore.runningWorkflowId || '',
-      convId: conv ? conv.id : '',
+      workflowId: wfId,
+      convId: conv ? conv.id : convId,
       assistantIdx: ctxAssistantIdx,
       stage: data.stage,
       stageOutput: data.stage_output || {},
@@ -248,8 +175,7 @@ const sendMessage = () => {
     workflowStore.showConfirmDialog(ctx);
   };
 
-  // SSE 回调(精简版,顶层共享 startNextStageStream 处理后续)
-  const streamCallbacks = {
+  return {
     onStageStart: (data: any) => {
       showSlowHint.value = false;
       if (slowHintTimer) clearTimeout(slowHintTimer);
@@ -290,8 +216,95 @@ const sendMessage = () => {
     },
     onAwaitingConfirmation,
   };
+};
 
-  if (isFollowUp) {
+// 阶段图标/标签辅助（用于 skip 自动重入时的提示）
+const STAGE_META: Record<string, StageHint> = {
+  collecting: { icon: '🔍', label: '数据采集' },
+  cleaning: { icon: '🧹', label: '数据清洗' },
+  analyzing: { icon: '🧠', label: '分析洞察' },
+  reporting: { icon: '📝', label: '生成报告' },
+};
+const stageIconFor = (stage: string) => STAGE_META[stage]?.icon || '⚙️';
+const stageLabelFor = (stage: string) => STAGE_META[stage]?.label || stage;
+
+const startNextStageStream = (
+  convId: string,
+  assistantIdx: number,
+  workflowId: string,
+  nextStage: string | null,
+  isFollowUp: boolean,
+) => {
+  if (!nextStage) {
+    return;
+  }
+  // Spec 2: 4 阶段都用 stage-specific 端点
+  if (nextStage in STAGE_META) {
+    workflowStore.startStageStream(
+      convId,
+      assistantIdx,
+      workflowId,
+      nextStage as any,
+      buildStreamCallbacks(convId, assistantIdx, isFollowUp)
+    );
+  } else {
+    // 兜底：未知 stage
+    workflowStore.startStageStream(
+      convId,
+      assistantIdx,
+      workflowId,
+      'collecting',
+      buildStreamCallbacks(convId, assistantIdx, isFollowUp)
+    );
+  }
+};
+
+const handleConfirmDialogConfirmed = (data: { ctx: ConfirmContext; response: any; decision: 'accept' | 'reject' }) => {
+  const { ctx, response } = data;
+  const nextStage = response?.next_stage as string | null | undefined;
+  loading.value = true;
+  showSlowHint.value = false;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+  // 推断 isFollowUp（弹窗场景下重置跳过标记除外）
+  const isFollowUp = !!workflowStore.activeConversation
+    && workflowStore.activeConversation.messages.length > 0
+    && workflowStore.activeConversation.status === 'completed';
+  startNextStageStream(ctx.convId, ctx.assistantIdx, ctx.workflowId, nextStage || null, isFollowUp);
+};
+
+const handleConfirmDialogCancelled = () => {
+  loading.value = false;
+  currentStageHint.value = null;
+  showSlowHint.value = false;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+};
+
+const sendMessage = () => {
+  const topic = inputTopic.value.trim();
+  if (!topic || loading.value) return;
+
+  workflowStore.clearEventSource();
+  currentStageHint.value = null;
+  if (slowHintTimer) {
+    clearTimeout(slowHintTimer);
+    slowHintTimer = null;
+  }
+  showSlowHint.value = false;
+
+  const activeConv = workflowStore.activeConversation;
+  const isFollowUp = !!activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
+
+  inputTopic.value = '';
+  loading.value = true;
+  scrollToBottom();
+
+  if (isFollowUp && activeConv) {
     // 追问模式：在当前对话中追加消息
     activeConv.messages.push({ role: 'user', content: topic });
     activeConv.messages.push({
@@ -307,17 +320,16 @@ const sendMessage = () => {
       .slice(0, -2)
       .map(m => ({ role: m.role, content: m.content || m.reportMarkdown || '' }));
 
-    inputTopic.value = '';
-    loading.value = true;
-    scrollToBottom();
+    const cbs = buildStreamCallbacks(activeConv.id, assistantIdx, isFollowUp);
 
     workflowApi.followUp({ message: topic, conversation_history: conversationHistory })
       .then((res) => {
-        workflowStore.startWorkflowStream(
+        workflowStore.startStageStream(
           activeConv.id,
           assistantIdx,
           res.data.workflow_id,
-          streamCallbacks,
+          'collecting',
+          cbs,
         );
       })
       .catch(() => {
@@ -342,19 +354,17 @@ const sendMessage = () => {
       chartOptions: [],
     });
 
-    inputTopic.value = '';
-    loading.value = true;
-    scrollToBottom();
-
     const assistantIdx = 1;
+    const cbs = buildStreamCallbacks(conv.id, assistantIdx, isFollowUp);
 
     workflowApi.start({ topic, max_items: 5 })
       .then((res) => {
-        workflowStore.startWorkflowStream(
+        workflowStore.startStageStream(
           conv.id,
           assistantIdx,
           res.data.workflow_id,
-          streamCallbacks,
+          'collecting',
+          cbs,
         );
 
         showSlowHint.value = false;

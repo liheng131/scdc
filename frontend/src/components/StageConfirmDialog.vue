@@ -1,48 +1,58 @@
 <script setup lang="ts">
 /**
- * 阶段确认弹窗 (Spec 1)
+ * 阶段确认弹窗 (Spec 2: 4 阶段通用)
  *
- * 当后端 SSE 推送 stage_state='awaiting_confirmation' 时展示。
- * 用户可:
- *  - 接受 (accept) → 进入下一阶段
- *  - 重试 (reject) → 重跑当前阶段
- *      - 可选:补充 URL / 关键词(与原 topic 合并)
- *      - 可选:文字反馈(AI 解析后调整策略)
+ * 动态内容区: 按 ctx.stage 选 4 个 renderer 之一
+ *   - collecting → CollectingContentRenderer (信源列表)
+ *   - cleaning   → CleaningContentRenderer   (清洗后信源 + 勾选 + 阈值)
+ *   - analyzing  → AnalyzingContentRenderer  (洞察 + 勾选 + 维度)
+ *   - reporting  → ReportingContentRenderer  (报告 markdown + 富文本编辑)
+ *
+ * 通用: 重试折叠区（URL/关键词/反馈）+ 底部按钮 + 关闭二次确认 + 本次跳过勾选
  */
 import { ref, computed, watch } from 'vue';
-import { ElMessage } from 'element-plus';
-import { Check, Refresh, Link, Key, ChatLineSquare, CircleClose, Loading } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { Check, Refresh, ChatLineSquare, Loading } from '@element-plus/icons-vue';
 import { useWorkflowStore, type ConfirmContext } from '../stores/workflow';
 import type { StageConfirmRequest, StageConfirmResponse } from '../api';
+import CollectingContentRenderer from './stage-renderers/CollectingContentRenderer.vue';
+import CleaningContentRenderer from './stage-renderers/CleaningContentRenderer.vue';
+import AnalyzingContentRenderer from './stage-renderers/AnalyzingContentRenderer.vue';
+import ReportingContentRenderer from './stage-renderers/ReportingContentRenderer.vue';
 
 const store = useWorkflowStore();
 
-// 双向绑定的本地表单状态
+// 表单状态（重试输入 + renderer 共享）
 const userFeedback = ref('');
 const extraUrls = ref<string[]>(['']);
 const extraKeywords = ref<string[]>(['']);
+const skipRemaining = ref(false);  // Spec 2: 本次剩余阶段自动接受
+
+// renderer 共享的 userEdits（重试时拼到 body）
+const rendererUserEdits = ref<Record<string, any>>({});
 
 // 弹窗可见性
 const visible = computed({
   get: () => store.confirmDialogVisible,
   set: (v: boolean) => {
-    if (!v) store.hideConfirmDialog();
+    if (!v) handleCloseAttempt();
   },
 });
 
 const ctx = computed<ConfirmContext | null>(() => store.confirmContext);
 const submitting = computed(() => store.confirmSubmitting);
 
-// sources 列表
-const sources = computed<any[]>(() => {
-  const o = ctx.value?.stageOutput;
-  if (!o) return [];
-  if (Array.isArray(o.sources)) return o.sources;
-  return [];
+// Spec 2: 4 阶段 renderer 映射
+const rendererMap: Record<string, any> = {
+  collecting: CollectingContentRenderer,
+  cleaning: CleaningContentRenderer,
+  analyzing: AnalyzingContentRenderer,
+  reporting: ReportingContentRenderer,
+};
+const activeRenderer = computed(() => {
+  const stage = ctx.value?.stage;
+  return stage && rendererMap[stage] ? rendererMap[stage] : null;
 });
-
-const itemCount = computed(() => sources.value.length);
-const warning = computed(() => ctx.value?.stageOutput?.warning || '');
 
 const stageLabel = computed(() => {
   const m: Record<string, string> = {
@@ -56,12 +66,16 @@ const stageLabel = computed(() => {
 
 const retryCount = computed(() => ctx.value?.stageHistoryLength ?? 0);
 
+const warning = computed(() => ctx.value?.stageOutput?.warning || '');
+
 // reset 表单
 watch(() => ctx.value, (v) => {
   if (v) {
     userFeedback.value = '';
     extraUrls.value = [''];
     extraKeywords.value = [''];
+    rendererUserEdits.value = {};
+    skipRemaining.value = false;
   }
 }, { immediate: true });
 
@@ -84,7 +98,8 @@ const canReject = computed(() =>
   && !!ctx.value
   && (userFeedback.value.trim().length > 0
       || cleanedUrls.value.length > 0
-      || cleanedKeywords.value.length > 0)
+      || cleanedKeywords.value.length > 0
+      || Object.keys(rendererUserEdits.value || {}).length > 0)
 );
 
 const emit = defineEmits<{
@@ -92,10 +107,27 @@ const emit = defineEmits<{
   (e: 'cancelled'): void;
 }>();
 
+// 构造重试 body（合并通用 + renderer userEdits）
+const buildRejectBody = (): StageConfirmRequest => {
+  return {
+    decision: 'reject',
+    user_edits: {
+      extra_urls: cleanedUrls.value.length ? cleanedUrls.value : undefined,
+      extra_keywords: cleanedKeywords.value.length ? cleanedKeywords.value : undefined,
+      ...(rendererUserEdits.value || {}),  // 各 renderer 扩展字段
+    },
+    user_feedback: userFeedback.value.trim() || undefined,
+  };
+};
+
 const handleAccept = async () => {
   if (!ctx.value) return;
   const body: StageConfirmRequest = { decision: 'accept' };
   try {
+    // Spec 2: 本次剩余阶段跳过模式
+    if (skipRemaining.value && ctx.value.workflowId) {
+      store.setSkipRemaining(ctx.value.workflowId, true);
+    }
     const resp = await store.confirmStage(ctx.value.workflowId, body);
     ElMessage.success('已接受，进入下一阶段');
     emit('confirmed', { ctx: ctx.value, response: resp, decision: 'accept' });
@@ -108,20 +140,12 @@ const handleAccept = async () => {
 const handleReject = async () => {
   if (!ctx.value) return;
   if (!canReject.value) {
-    ElMessage.warning('请至少补充一项内容(URL、关键词或文字反馈)再重试');
+    ElMessage.warning('请至少补充一项内容再重试');
     return;
   }
-  const body: StageConfirmRequest = {
-    decision: 'reject',
-    user_edits: {
-      extra_urls: cleanedUrls.value.length ? cleanedUrls.value : undefined,
-      extra_keywords: cleanedKeywords.value.length ? cleanedKeywords.value : undefined,
-    },
-    user_feedback: userFeedback.value.trim() || undefined,
-  };
   try {
-    const resp = await store.confirmStage(ctx.value.workflowId, body);
-    ElMessage.info('已重试，AI 正在重新采集...');
+    const resp = await store.confirmStage(ctx.value.workflowId, buildRejectBody());
+    ElMessage.info('已重试，AI 正在重新执行...');
     emit('confirmed', { ctx: ctx.value, response: resp, decision: 'reject' });
   } catch (e: any) {
     const msg = e?.response?.data?.detail || e?.message || '操作失败';
@@ -129,23 +153,63 @@ const handleReject = async () => {
   }
 };
 
+// Spec 2: 关闭二次确认（Q3 决定）
+// 关闭等价于接受当前结果
+const handleCloseAttempt = () => {
+  if (submitting.value) return;  // 提交中不允许关闭
+  if (!ctx.value) {
+    store.hideConfirmDialog();
+    emit('cancelled');
+    return;
+  }
+  ElMessageBox.confirm(
+    '关闭此弹窗将接受当前结果并进入下一阶段。确定要关闭吗？',
+    '确认关闭',
+    {
+      confirmButtonText: '确定关闭（接受）',
+      cancelButtonText: '继续查看',
+      type: 'warning',
+    }
+  )
+    .then(async () => {
+      // 等价 accept
+      if (ctx.value) {
+        if (skipRemaining.value && ctx.value.workflowId) {
+          store.setSkipRemaining(ctx.value.workflowId, true);
+        }
+        try {
+          const resp = await store.confirmStage(ctx.value.workflowId, { decision: 'accept' });
+          ElMessage.success('已接受，进入下一阶段');
+          emit('confirmed', { ctx: ctx.value, response: resp, decision: 'accept' });
+        } catch (e: any) {
+          const msg = e?.response?.data?.detail || e?.message || '操作失败';
+          ElMessage.error(`接受失败: ${msg}`);
+        }
+      } else {
+        store.hideConfirmDialog();
+        emit('cancelled');
+      }
+    })
+    .catch(() => {
+      // 用户选"继续查看" - 留在弹窗
+    });
+};
+
 const handleCancel = () => {
   store.hideConfirmDialog();
   emit('cancelled');
 };
-
-const truncate = (s: string, n: number) =>
-  (s || '').length > n ? (s || '').slice(0, n) + '…' : (s || '');
 </script>
 
 <template>
   <el-dialog
     v-model="visible"
     :title="`确认${stageLabel}结果`"
-    width="760px"
+    width="840px"
     :close-on-click-modal="false"
     :close-on-press-escape="!submitting"
     :show-close="!submitting"
+    :before-close="handleCloseAttempt"
     align-center
     class="stage-confirm-dialog"
   >
@@ -157,7 +221,7 @@ const truncate = (s: string, n: number) =>
           {{ submitting ? '处理中…' : '等待您的确认' }}
         </el-tag>
         <span class="stage-summary">
-          <strong>{{ stageLabel }}</strong> 已完成 · 共采集 <strong>{{ itemCount }}</strong> 条信源
+          <strong>{{ stageLabel }}</strong> 已完成，请审阅
         </span>
         <el-tag v-if="retryCount > 0" type="info" size="small" effect="plain">
           第 {{ retryCount + 1 }} 次确认
@@ -173,99 +237,61 @@ const truncate = (s: string, n: number) =>
         class="warning-alert"
       />
 
-      <!-- 信源列表 -->
-      <el-scrollbar height="280px" class="sources-scroll">
-        <div v-if="sources.length === 0" class="empty">
-          <el-empty description="本阶段无信源输出" :image-size="80" />
-        </div>
-        <el-card
-          v-for="(src, i) in sources"
-          :key="i"
-          shadow="hover"
-          class="source-card"
-          :body-style="{ padding: '12px 16px' }"
-        >
-          <div class="source-head">
-            <el-tag size="small" :type="src.source_type === 'news' ? 'primary' : 'success'" effect="light">
-              {{ src.source_type || 'unknown' }}
-            </el-tag>
-            <a
-              v-if="src.source_uri"
-              :href="src.source_uri"
-              target="_blank"
-              rel="noopener"
-              class="source-link"
-            >
-              {{ src.title || truncate(src.source_uri, 60) }}
-            </a>
-            <span v-else class="source-title">{{ src.title || '(无标题)' }}</span>
-          </div>
-          <div v-if="src.snippet" class="source-snippet">{{ truncate(src.snippet, 220) }}</div>
-          <div class="source-meta">
-            <span>长度: {{ src.content_length || 0 }} 字符</span>
-            <span v-if="src.metadata && Object.keys(src.metadata).length">
-              {{ Object.entries(src.metadata).slice(0, 2).map(([k, v]) => `${k}=${v}`).join(' · ') }}
-            </span>
-          </div>
-        </el-card>
-      </el-scrollbar>
+      <!-- Spec 2: 动态内容区（4 renderer 之一） -->
+      <component
+        :is="activeRenderer"
+        v-if="activeRenderer"
+        :stage-output="ctx.stageOutput"
+        v-model:user-edits="rendererUserEdits"
+        class="content-renderer"
+      />
 
-      <!-- 重试输入区(默认折叠) -->
+      <!-- 重试输入区(默认折叠) - 跨阶段通用 -->
       <el-collapse class="retry-collapse">
-        <el-collapse-item name="retry" title="🔁 重试此阶段(添加补充材料 / 反馈)">
-          <!-- 补充 URL -->
+        <el-collapse-item name="retry" title="🔁 重试此阶段（添加补充材料 / 反馈）">
+          <!-- 通用：补充 URL -->
           <div class="form-block">
-            <label class="form-label">
-              <el-icon><Link /></el-icon>
-              补充 URL
-            </label>
+            <label class="form-label">补充 URL</label>
             <div v-for="(_, i) in extraUrls" :key="`url-${i}`" class="form-row">
               <el-input
                 v-model="extraUrls[i]"
                 placeholder="https://example.com/article-1"
                 clearable
-                size="default"
               />
               <el-button
                 v-if="extraUrls.length > 1"
                 text
-                :icon="CircleClose"
                 @click="removeUrl(i)"
                 class="row-remove"
-              />
+              >×</el-button>
             </div>
-            <el-button text size="small" @click="addUrl" :icon="Link">+ 添加 URL</el-button>
+            <el-button text size="small" @click="addUrl">+ 添加 URL</el-button>
           </div>
 
-          <!-- 补充关键词 -->
+          <!-- 通用：补充关键词 -->
           <div class="form-block">
-            <label class="form-label">
-              <el-icon><Key /></el-icon>
-              补充关键词
-            </label>
+            <label class="form-label">补充关键词</label>
             <div v-for="(_, i) in extraKeywords" :key="`kw-${i}`" class="form-row">
               <el-input
                 v-model="extraKeywords[i]"
                 placeholder="例:AI制药 · 临床试验"
                 clearable
-                size="default"
               />
               <el-button
                 v-if="extraKeywords.length > 1"
                 text
-                :icon="CircleClose"
                 @click="removeKw(i)"
                 class="row-remove"
-              />
+              >×</el-button>
             </div>
-            <el-button text size="small" @click="addKw" :icon="Key">+ 添加关键词</el-button>
+            <el-button text size="small" @click="addKw">+ 添加关键词</el-button>
           </div>
 
-          <!-- 文字反馈 -->
+          <!-- 通用：文字反馈 -->
           <div class="form-block">
             <label class="form-label">
               <el-icon><ChatLineSquare /></el-icon>
-              文字反馈(可选,AI 会自动解析并调整策略)
+              文字反馈（可选，AI 会自动解析并调整策略）
             </label>
             <el-input
               v-model="userFeedback"
@@ -273,7 +299,7 @@ const truncate = (s: string, n: number) =>
               :rows="3"
               :maxlength="2000"
               show-word-limit
-              placeholder="例:上次没采到国内信源,请补采中国 2025 年 AI 制药新闻,并重点关注临床试验数据"
+              placeholder="例:上次没采到国内信源，请补采中国 2025 年 AI 制药新闻"
             />
           </div>
         </el-collapse-item>
@@ -282,25 +308,30 @@ const truncate = (s: string, n: number) =>
 
     <template #footer>
       <div class="dialog-footer">
-        <el-button @click="handleCancel" :disabled="submitting">取消</el-button>
-        <el-button
-          type="warning"
-          :icon="Refresh"
-          :loading="submitting"
-          :disabled="!canReject"
-          @click="handleReject"
-        >
-          重试此阶段
-        </el-button>
-        <el-button
-          type="primary"
-          :icon="Check"
-          :loading="submitting"
-          :disabled="!canSubmit"
-          @click="handleAccept"
-        >
-          接受,继续
-        </el-button>
+        <el-checkbox v-model="skipRemaining" :disabled="submitting" class="skip-checkbox">
+          本次剩余阶段自动接受
+        </el-checkbox>
+        <div class="footer-buttons">
+          <el-button @click="handleCancel" :disabled="submitting">取消</el-button>
+          <el-button
+            type="warning"
+            :icon="Refresh"
+            :loading="submitting"
+            :disabled="!canReject"
+            @click="handleReject"
+          >
+            重试此阶段
+          </el-button>
+          <el-button
+            type="primary"
+            :icon="Check"
+            :loading="submitting"
+            :disabled="!canSubmit"
+            @click="handleAccept"
+          >
+            接受，继续
+          </el-button>
+        </div>
       </div>
     </template>
   </el-dialog>
@@ -333,70 +364,8 @@ const truncate = (s: string, n: number) =>
   margin-bottom: 12px;
 }
 
-.sources-scroll {
-  border: 1px solid var(--scdc-bg-sunken, #e8e3d6);
-  border-radius: 8px;
-  background: var(--scdc-bg-elevated, #faf7f0);
-  padding: 8px 12px;
+.content-renderer {
   margin-bottom: 16px;
-}
-
-.empty {
-  display: flex;
-  justify-content: center;
-  padding: 20px 0;
-}
-
-.source-card {
-  margin-bottom: 10px;
-  border: 1px solid var(--scdc-bg-sunken, #e8e3d6);
-}
-
-.source-card:last-child {
-  margin-bottom: 0;
-}
-
-.source-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  flex-wrap: wrap;
-}
-
-.source-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--scdc-ink, #333);
-}
-
-.source-link {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--scdc-accent, #b45309);
-  text-decoration: none;
-  word-break: break-all;
-}
-
-.source-link:hover {
-  text-decoration: underline;
-}
-
-.source-snippet {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--scdc-ink-muted, #666);
-  margin-bottom: 6px;
-  padding-left: 4px;
-  border-left: 2px solid var(--scdc-bg-sunken, #e8e3d6);
-}
-
-.source-meta {
-  display: flex;
-  gap: 12px;
-  font-size: 11px;
-  color: var(--scdc-ink-soft, #999);
-  font-family: var(--scdc-font-mono, monospace);
 }
 
 .retry-collapse {
@@ -437,8 +406,19 @@ const truncate = (s: string, n: number) =>
 
 .dialog-footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.footer-buttons {
+  display: flex;
   gap: 8px;
+}
+
+.skip-checkbox {
+  font-size: 13px;
+  color: var(--scdc-ink-muted, #666);
 }
 
 .rotating {
