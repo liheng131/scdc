@@ -664,8 +664,9 @@ class WorkflowService:
         if decision not in ("accept", "reject", "skip"):
             raise HTTPException(status_code=422, detail=f"Invalid decision: {decision}")
 
-        # 重试次数检查（仅 reject 受限）
-        if decision == "reject" and len(state.stage_history) >= MAX_RETRY_PER_STAGE:
+        # 重试次数检查（仅 reject 受限，且只数 reject 决策）
+        reject_count = sum(1 for h in state.stage_history if h.get("decision") == "reject")
+        if decision == "reject" and reject_count >= MAX_RETRY_PER_STAGE:
             raise HTTPException(
                 status_code=429,
                 detail=f"重试次数过多（已 {len(state.stage_history)} 次），请接受或取消工作流",
