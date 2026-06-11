@@ -26,7 +26,13 @@ from app.models.workflow_run import WorkflowRun, StageState
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.master_agent import MasterAgent
 from app.agents.collector import CollectorAgent
-from app.schemas.agent import OrchestratorInput, CollectorInput
+from app.agents.cleaner import CleanerAgent
+from app.agents.analyzer import AnalyzerAgent
+from app.agents.reporter import ReporterAgent
+from app.schemas.agent import (
+    OrchestratorInput, CollectorInput, CollectedItem,
+    CleanerInput, AnalyzerInput, ReporterInput,
+)
 from app.services.intent_classifier import IntentClassifier
 from app.services.direct_response import DirectResponseService
 
@@ -48,7 +54,7 @@ STAGE_ICONS = {
 }
 
 # 最大重试次数（防止用户无限重试耗尽搜索 API 配额）
-MAX_RETRY_PER_STAGE = 5
+MAX_RETRY_PER_STAGE = 3  # Spec 2: 从 5 改为 3
 
 
 class WorkflowState:
@@ -362,94 +368,278 @@ class WorkflowService:
         async for sse_event in self.run_workflow_stream(state, start_stage=target_stage, reentry_context=user_feedback):
             yield sse_event
 
-    # ========== Phase 2 Human-in-the-Loop (Spec 1) ==========
+    # ========== Phase 2 Human-in-the-Loop (Spec 1 + Spec 2) ==========
 
     async def run_collecting_only_stream(self, state: WorkflowState) -> AsyncGenerator[str, None]:
-        """Spec 1: 仅运行 collecting 阶段，结束后进入 awaiting_confirmation 状态。
+        """Spec 1: 仅运行 collecting 阶段（保留作向后兼容的薄包装）。
 
-        与 run_workflow_stream 的区别：
-        - 不调用 OrchestratorAgent，只调用 CollectorAgent
-        - 完成后设 state.stage_state='awaiting_confirmation'
-        - SSE 流正常结束（yield stage_complete 事件后停止）
+        Spec 2 改造后，内部委托 run_stage_only_stream(state, "collecting")。
+        SSE 事件格式与之前完全一致，老客户端零影响。
         """
-        logger.info(f"[{state.workflow_id}] run_collecting_only_stream: topic='{state.topic}'")
+        async for sse_event in self.run_stage_only_stream(state, "collecting"):
+            yield sse_event
+
+    async def run_stage_only_stream(self, state: WorkflowState, stage: str) -> AsyncGenerator[str, None]:
+        """Spec 2: 通用 stage runner。跑指定 stage，结束后进入 awaiting_confirmation 状态。
+
+        dispatch 表:
+        - collecting → CollectorAgent
+        - cleaning   → CleanerAgent
+        - analyzing  → AnalyzerAgent
+        - reporting  → ReporterAgent
+
+        每个 stage 完成后写:
+        - state.stage_output: 给前端展示用的精简版（preview）
+        - state.stages[stage]["_raw"]: 给下一阶段消费用的完整 agent 输出（dict 化）
+        """
+        if stage not in STAGE_SEQUENCE:
+            raise ValueError(f"Unknown stage: {stage}")
+
+        logger.info(f"[{state.workflow_id}] run_stage_only_stream: stage='{stage}', topic='{state.topic}'")
+
+        # 状态校验
+        if state.stage_state != StageState.RUNNING:
+            raise RuntimeError(
+                f"Workflow {state.workflow_id} is not in 'running' state "
+                f"(current: {state.stage_state}). Cannot run stage."
+            )
+        if state.current_stage != stage:
+            raise RuntimeError(
+                f"Workflow {state.workflow_id} current_stage is '{state.current_stage}', "
+                f"but requested to run '{stage}'"
+            )
+
         state.status = "running"
-        state.stage_state = StageState.RUNNING
-        state.current_stage = "collecting"
         await self._persist_stage_update(state)
+
+        stage_idx = STAGE_SEQUENCE.index(stage)
 
         # SSE: stage_start
         yield self._sse("stage_start", {
-            "stage": "collecting",
-            "label": STAGE_LABELS["collecting"],
-            "icon": STAGE_ICONS["collecting"],
-            "index": 0,
-            "total": 4,
+            "stage": stage,
+            "label": STAGE_LABELS[stage],
+            "icon": STAGE_ICONS[stage],
+            "index": stage_idx,
+            "total": len(STAGE_SEQUENCE),
         })
 
         try:
-            # 直接调用 CollectorAgent，不走 OrchestratorAgent
-            collector = CollectorAgent()
-            col_in = CollectorInput(
-                task_id=state.workflow_id,
-                topic=state.topic,
-                max_items=state.max_items,
-            )
-            col_out = await collector.execute(col_in)
+            # Dispatch
+            stage_output, raw_output = await self._run_single_stage(state, stage)
 
-            if not col_out.success:
-                raise RuntimeError(f"Collector failed: {col_out.error}")
-
-            # 构造 stage_output（供前端展示源列表）
-            sources = [
-                {
-                    "source_type": it.source_type,
-                    "source_uri": it.source_uri,
-                    "title": it.title,
-                    "snippet": (it.content or "")[:300],
-                    "content_length": len(it.content or ""),
-                    "metadata": it.metadata or {},
-                }
-                for it in col_out.items
-            ]
-            stage_output = {
-                "stage": "collecting",
-                "sources": sources,
-                "item_count": len(sources),
-                "warning": col_out.warning,
-            }
-
-            # 更新 state
+            # 写 state
             state.stage_output = stage_output
-            state.stages["collecting"] = {
-                "item_count": len(sources),
-                "warning": col_out.warning,
-            }
+            # 保留原有 stages 摘要（向后兼容） + 加 _raw 给下一阶段
+            existing = state.stages.get(stage, {}) if state.stages else {}
+            state.stages[stage] = {**existing, "_raw": raw_output}
+            # 同步 stage_output 里的关键 stats（便于其他模块读）
+            if stage == "collecting":
+                state.stages[stage]["item_count"] = raw_output.get("item_count", 0)
+                state.stages[stage]["warning"] = raw_output.get("warning", "")
+            elif stage == "cleaning":
+                state.stages[stage]["total_in"] = raw_output.get("stats", {}).get("total_in", 0)
+                state.stages[stage]["total_out"] = raw_output.get("stats", {}).get("total_out", 0)
+
             state.stage_state = StageState.AWAITING_CONFIRMATION
             await self._persist_stage_update(state)
 
-            # SSE: stage_complete 事件后流正常结束
+            # SSE: stage_complete
             yield self._sse("stage_complete", {
-                "stage": "collecting",
-                "label": STAGE_LABELS["collecting"],
+                "stage": stage,
+                "label": STAGE_LABELS[stage],
                 "stage_state": StageState.AWAITING_CONFIRMATION,
                 "stage_output": stage_output,
             })
             logger.info(
-                f"[{state.workflow_id}] collecting stage done, %d items, awaiting confirmation",
-                len(sources),
+                f"[{state.workflow_id}] {stage} stage done, awaiting confirmation"
             )
         except Exception as e:
-            logger.error(f"[{state.workflow_id}] collecting stage failed: {e}", exc_info=True)
+            logger.error(f"[{state.workflow_id}] {stage} stage failed: {e}", exc_info=True)
             state.status = "failed"
             state.error = str(e)[:500]
             state.stage_state = StageState.FAILED
             await self._persist_stage_update(state)
             yield self._sse("stage_error", {
-                "stage": "collecting",
-                "label": STAGE_LABELS["collecting"],
+                "stage": stage,
+                "label": STAGE_LABELS[stage],
                 "error": state.error,
             })
+
+    async def _run_single_stage(self, state: WorkflowState, stage: str) -> tuple:
+        """Spec 2: 跑单个 stage，返回 (stage_output_preview, raw_output_dict)。
+
+        raw_output_dict 是给下一阶段消费的完整 agent 输出（dict 化）。
+        stage_output_preview 是给前端展示的精简版。
+        """
+        if stage == "collecting":
+            return await self._run_collecting_stage(state)
+        elif stage == "cleaning":
+            return await self._run_cleaning_stage(state)
+        elif stage == "analyzing":
+            return await self._run_analyzing_stage(state)
+        elif stage == "reporting":
+            return await self._run_reporting_stage(state)
+        else:
+            raise ValueError(f"Unknown stage: {stage}")
+
+    async def _run_collecting_stage(self, state: WorkflowState):
+        """收集阶段: 调 CollectorAgent，序列化 sources 列表。"""
+        collector = CollectorAgent()
+        col_in = CollectorInput(
+            task_id=state.workflow_id,
+            topic=state.topic,
+            max_items=state.max_items,
+        )
+        col_out = await collector.execute(col_in)
+        if not col_out.success:
+            raise RuntimeError(f"Collector failed: {col_out.error}")
+
+        sources = [
+            {
+                "source_type": it.source_type,
+                "source_uri": it.source_uri,
+                "title": it.title,
+                "snippet": (it.content or "")[:300],
+                "content_length": len(it.content or ""),
+                "metadata": it.metadata or {},
+            }
+            for it in col_out.items
+        ]
+        stage_output = {
+            "stage": "collecting",
+            "sources": sources,
+            "item_count": len(sources),
+            "warning": col_out.warning,
+        }
+        raw_output = {
+            "items": [it.model_dump() for it in col_out.items],
+            "item_count": len(sources),
+            "warning": col_out.warning,
+        }
+        return stage_output, raw_output
+
+    async def _run_cleaning_stage(self, state: WorkflowState):
+        """清洗阶段: 用 collecting 阶段的 raw items 调 CleanerAgent。
+
+        需要的输入来自 state.stages["collecting"]["_raw"]["items"]。
+        """
+        collecting_raw = (state.stages.get("collecting", {}) or {}).get("_raw", {})
+        items_dict = collecting_raw.get("items", [])
+        if not items_dict:
+            raise RuntimeError("Cannot run cleaning: no items from collecting stage")
+
+        # 重建 Pydantic 模型
+        raw_items = [CollectedItem(**it) for it in items_dict]
+
+        cleaner = CleanerAgent()
+        cln_in = CleanerInput(task_id=state.workflow_id, raw_items=raw_items)
+        cln_out = await cleaner.execute(cln_in)
+        if not cln_out.success:
+            raise RuntimeError(f"Cleaner failed: {cln_out.error}")
+
+        cleaned_items_dict = [it.model_dump() for it in cln_out.cleaned_items]
+        stage_output = {
+            "stage": "cleaning",
+            "cleaned_items": cleaned_items_dict,
+            "stats": {
+                "total_in": len(raw_items),
+                "total_out": len(cln_out.cleaned_items),
+                "removed_count": cln_out.total_removed,
+            },
+        }
+        raw_output = {
+            "cleaned_items": cleaned_items_dict,
+            "stats": stage_output["stats"],
+        }
+        return stage_output, raw_output
+
+    async def _run_analyzing_stage(self, state: WorkflowState):
+        """分析阶段: 用 cleaning 阶段的 cleaned_items 调 AnalyzerAgent。"""
+        from app.schemas.agent import CleanedItem as CleanedItemModel
+
+        cleaning_raw = (state.stages.get("cleaning", {}) or {}).get("_raw", {})
+        cleaned_items_dict = cleaning_raw.get("cleaned_items", [])
+        if not cleaned_items_dict:
+            raise RuntimeError("Cannot run analyzing: no cleaned_items from cleaning stage")
+
+        cleaned_items = [CleanedItemModel(**it) for it in cleaned_items_dict]
+
+        analyzer = AnalyzerAgent()
+        ana_in = AnalyzerInput(
+            task_id=state.workflow_id,
+            topic=state.topic,
+            cleaned_items=cleaned_items,
+            dimensions=state.dimensions or [
+                "宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手",
+            ],
+        )
+        ana_out = await analyzer.execute(ana_in)
+        if not ana_out.success:
+            raise RuntimeError(f"Analyzer failed: {ana_out.error}")
+
+        insights_dict = [it.model_dump() for it in ana_out.insights]
+        stage_output = {
+            "stage": "analyzing",
+            "insights": insights_dict,
+            "dimensions": state.dimensions or [],
+            "summary": ana_out.summary,
+        }
+        raw_output = {
+            "analyzer_output": ana_out.model_dump(),
+            "insights": insights_dict,
+        }
+        return stage_output, raw_output
+
+    async def _run_reporting_stage(self, state: WorkflowState):
+        """报告阶段: 用 analyzing 阶段的 analyzer_output 调 ReporterAgent。"""
+        from app.schemas.agent import AnalyzerOutput as AnalyzerOutputModel
+
+        analyzing_raw = (state.stages.get("analyzing", {}) or {}).get("_raw", {})
+        analyzer_output_dict = analyzing_raw.get("analyzer_output", {})
+        if not analyzer_output_dict:
+            raise RuntimeError("Cannot run reporting: no analyzer_output from analyzing stage")
+
+        analyzer_output = AnalyzerOutputModel(**analyzer_output_dict)
+
+        # 构造 source_contents（reporter 需要 cleaned items 的纯文本）
+        cleaning_raw = (state.stages.get("cleaning", {}) or {}).get("_raw", {})
+        cleaned_items_dict = cleaning_raw.get("cleaned_items", [])
+        source_contents = []
+        for ci in cleaned_items_dict:
+            chunks = ci.get("content_chunks") or []
+            full_text = "\n".join(chunks) if chunks else ci.get("summary", "")
+            source_contents.append({
+                "uri": ci.get("source_uri", ""),
+                "title": ci.get("title", ""),
+                "content": full_text[:1000],
+            })
+
+        reporter = ReporterAgent()
+        rep_in = ReporterInput(
+            task_id=state.workflow_id,
+            topic=state.topic,
+            analyzer_output=analyzer_output,
+            include_charts=True,
+            dimensions=state.dimensions or [],
+            source_contents=source_contents,
+        )
+        rep_out = await reporter.execute(rep_in)
+        if not rep_out.success:
+            raise RuntimeError(f"Reporter failed: {rep_out.error}")
+
+        sections_dict = [s.model_dump() for s in rep_out.sections]
+        stage_output = {
+            "stage": "reporting",
+            "report": rep_out.markdown_report,
+            "sections": sections_dict,
+        }
+        raw_output = {
+            "report": rep_out.markdown_report,
+            "sections": sections_dict,
+            "chart_configs": rep_out.chart_configs,
+            "chart_images": rep_out.chart_images,
+        }
+        return stage_output, raw_output
 
     async def confirm_stage(self, state: WorkflowState, decision: str,
                             user_edits: Optional[dict] = None,

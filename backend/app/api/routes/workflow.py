@@ -215,6 +215,33 @@ async def stream_workflow(
 
 
 # --- Phase 2: 数据采集阶段（collecting）单独 SSE 流 ---
+def _create_stage_stream_response(state, stage: str) -> StreamingResponse:
+    """Spec 2: 给定 workflow state 和目标 stage，返回 SSE StreamingResponse。
+
+    流程：
+    1. 校验 workflow 存在
+    2. 校验 state.stage_state == 'running' && state.current_stage == stage
+    3. 委托 workflow_service.run_stage_only_stream(state, stage)
+    """
+    if state.stage_state != "running":
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow is not in 'running' state (current: {state.stage_state})\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    if state.current_stage != stage:
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow current_stage is '{state.current_stage}', requested '{stage}'\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        workflow_service.run_stage_only_stream(state, stage),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{workflow_id}/stream-collecting")
 async def stream_collecting(
     workflow_id: str,
@@ -228,19 +255,49 @@ async def stream_collecting(
         async def err_gen():
             yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
         return StreamingResponse(err_gen(), media_type="text/event-stream")
-    if state.stage_state != "running":
+    return _create_stage_stream_response(state, "collecting")
+
+
+@router.get("/{workflow_id}/stream-cleaning")
+async def stream_cleaning(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    """Spec 2: 仅运行 cleaning 阶段的 SSE 流。"""
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
         async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow is not in 'running' state (current: {state.stage_state})\"}}\n\n"
+            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
         return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return StreamingResponse(
-        workflow_service.run_collecting_only_stream(state),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return _create_stage_stream_response(state, "cleaning")
+
+
+@router.get("/{workflow_id}/stream-analyzing")
+async def stream_analyzing(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    """Spec 2: 仅运行 analyzing 阶段的 SSE 流。"""
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    return _create_stage_stream_response(state, "analyzing")
+
+
+@router.get("/{workflow_id}/stream-reporting")
+async def stream_reporting(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user_sse),
+) -> StreamingResponse:
+    """Spec 2: 仅运行 reporting 阶段的 SSE 流。"""
+    state = await workflow_service.get_workflow(workflow_id)
+    if not state:
+        async def err_gen():
+            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+    return _create_stage_stream_response(state, "reporting")
 
 
 @router.get("/{workflow_id}", response_model=ResponseModel)
