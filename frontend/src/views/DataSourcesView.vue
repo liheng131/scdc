@@ -311,8 +311,8 @@ onMounted(() => {
             >
               查看记录
             </el-button>
-            <el-button type="primary" size="small" :icon="Edit" @click="handleEdit(row)" circle></el-button>
-            <el-button type="danger" size="small" :icon="Delete" @click="handleDelete(row)" circle></el-button>
+            <el-button type="primary" size="small" :icon="Edit" aria-label="编辑数据源" @click="handleEdit(row)" circle></el-button>
+            <el-button type="danger" size="small" :icon="Delete" aria-label="删除数据源" @click="handleDelete(row)" circle></el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -384,8 +384,8 @@ onMounted(() => {
             >
               抓取正文
             </el-button>
-            <el-button type="primary" size="small" :icon="Edit" @click="handleEditRecord(row)" circle></el-button>
-            <el-button type="danger" size="small" :icon="Delete" @click="handleDeleteRecord(row)" circle></el-button>
+            <el-button type="primary" size="small" :icon="Edit" aria-label="编辑记录" @click="handleEditRecord(row)" circle></el-button>
+            <el-button type="danger" size="small" :icon="Delete" aria-label="删除记录" @click="handleDeleteRecord(row)" circle></el-button>
           </template>
         </el-table-column>
       </el-table>

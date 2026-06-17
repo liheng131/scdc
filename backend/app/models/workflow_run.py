@@ -23,6 +23,9 @@ class WorkflowRun(Base, TimestampMixin):
     stages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 历史追问聚合 spec: 追问工作流指向其父工作流的 workflow_id
+    # 顶层对话 parent_workflow_id = NULL,追问对话 parent_workflow_id = 父的 workflow_id
+    parent_workflow_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     # Phase 2 Human-in-the-Loop：阶段状态机 + 输出 + 历史
     # Spec 1: 数据采集阶段确认
     stage_state: Mapped[str] = mapped_column(

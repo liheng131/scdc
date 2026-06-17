@@ -53,9 +53,16 @@ export const reportsApi = {
     return res.data;
   },
 
-  exportReportUrl: (id: number, fmt: string = 'docx'): string => {
+  exportReportUrl: (id: number, fmt: string = 'docx', template_id?: string): string => {
     const base = import.meta.env.VITE_API_BASE_URL || '';
-    return `${base}/api/v1/reports/${id}/export?fmt=${fmt}`;
+    const params = new URLSearchParams({ fmt });
+    if (template_id) params.set('template_id', template_id);
+    return `${base}/api/v1/reports/${id}/export?${params.toString()}`;
+  },
+
+  listPptTemplates: async (): Promise<ApiResponse<{ items: Array<{ id: string; name: string; description: string; file: string; layouts_count: number }>; total: number }>> => {
+    const res = await apiClient.get('/api/v1/templates/ppt');
+    return res.data;
   },
 
   getExportHeaders: (): Record<string, string> => {

@@ -15,6 +15,9 @@ from app.parsers.base import BaseParser
 from app.parsers.pdf import PDFParser
 from app.parsers.docx import DocxParser
 from app.parsers.excel import ExcelParser
+from app.parsers.markdown import MarkdownParser
+from app.parsers.txt import TxtParser
+from app.parsers.image_ocr import ImageOcrParser
 from app.schemas.parser import ParseResult
 from app.core.exceptions import BusinessException
 
@@ -26,6 +29,15 @@ class ParserManager:
             ".doc": DocxParser(),
             ".xlsx": ExcelParser(),
             ".xls": ExcelParser(),
+            ".md": MarkdownParser(),
+            ".markdown": MarkdownParser(),
+            ".txt": TxtParser(),
+            ".png": ImageOcrParser(),
+            ".jpg": ImageOcrParser(),
+            ".jpeg": ImageOcrParser(),
+            ".bmp": ImageOcrParser(),
+            ".tiff": ImageOcrParser(),
+            ".tif": ImageOcrParser(),
         }
 
     def get_parser(self, filename: str) -> BaseParser:

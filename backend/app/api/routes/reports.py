@@ -1,20 +1,31 @@
 """
 智能研报（Reports）API 路由
 
-提供报告的 CRUD、列表筛选（按 task_id / 关键词）、多格式导出（docx/pdf/md）。
+提供报告的 CRUD、列表筛选（按 task_id / 关键词）、多格式导出（docx/pdf/md/pptx）。
 
 导出功能直接返回文件流，浏览器自动触发下载。
+导出成功后自动触发邮件推送（向 notification_rules 中 trigger=report_ready 且 enabled=true 的邮箱发送）。
 """
 
+import asyncio
+import logging
+import os
+import tempfile
+import traceback as tb
 from typing import List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File, Form
 from pydantic import BaseModel, Field
+from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_active_user, get_current_active_user_sse, get_db
 from app.api.responses import success_response, ResponseModel
+from app.core.db import async_session_factory
 from app.models.user import User
+from app.models.report import Report
 from app.schemas.report import ReportCreate, ReportUpdate, ReportOut, ReportStatisticsResponse
+from app.schemas.notification import ReportPushRequest
 from app.services.report import ReportService
+from app.services.notification import NotificationService
 
 router = APIRouter()
 rep_service = ReportService()
@@ -156,23 +167,37 @@ async def upload_report(
 @router.get("/{report_id}/export")
 async def export_report(
     report_id: int,
-    fmt: str = Query("docx", description="导出格式：docx、pdf 或 md"),
+    fmt: str = Query("docx", description="导出格式:docx、pdf 或 md"),
+    template_id: Optional[str] = Query(None, description="PPT 母版模板 ID（仅当 fmt=pptx 时生效）"),
     current_user: User = Depends(get_current_active_user_sse),
     session: AsyncSession = Depends(get_db)
 ) -> Response:
     """
     导出报告为指定格式的文件
 
-    不返回 JSON，而是直接返回文件流（Response），
+    不返回 JSON,而是直接返回文件流(Response),
     通过 Content-Disposition 头触发浏览器下载。
 
-    lazy 行为：首次导出时（pending_vector_upload=True）自动同步触发 Milvus 写入，
-    这样"用户导出"作为用户主动确认的信号，触发 RAG 入库。
+    lazy 行为:首次导出时(pending_vector_upload=True)自动同步触发 Milvus 写入,
+    这样"用户导出"作为用户主动确认的信号,触发 RAG 入库。
+
+    导出成功后自动触发邮件推送（向 notification_rules 中 trigger=report_ready 且 enabled=true 的邮箱发送）。
+
+    错误处理:
+    - 报告不存在 / 参数错误 → 400
+    - 文件生成过程中 reportlab/docx/pptx 抛异常 → 500,并把异常信息回显到 detail
+      (这样前端 fetch 失败时能看到真实原因,便于排查 CJK 字体等问题)
     """
     try:
         # 首次导出时自动写入 Milvus
         await rep_service.upload_to_vector_store_if_pending(session, report_id)
-        filename, media_type, content = await rep_service.export_report(session, report_id, fmt)
+        filename, media_type, content = await rep_service.export_report(
+            session, report_id, fmt, template_id=template_id,
+        )
+
+        # 导出成功后异步触发邮件推送
+        asyncio.create_task(_trigger_export_notification(report_id, filename, content))
+
         return Response(
             content=content,
             media_type=media_type,
@@ -180,3 +205,50 @@ async def export_report(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.getLogger(__name__).error(
+            "export_report failed (id=%s fmt=%s): %s\n%s",
+            report_id, fmt, e, tb.format_exc(),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"生成 {fmt.upper()} 报告失败: {type(e).__name__}: {e}",
+        )
+
+
+async def _trigger_export_notification(report_id: int, filename: str, content: bytes) -> None:
+    """导出成功后异步触发邮件推送"""
+    try:
+        # 保存临时文件
+        suffix = filename.rsplit('.', 1)[-1] if '.' in filename else 'md'
+        with tempfile.NamedTemporaryFile(suffix=f'.{suffix}', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            async with async_session_factory() as sess:
+                # 读取报告信息
+                result = await sess.execute(sa_select(Report).where(Report.id == report_id))
+                report = result.scalar_one_or_none()
+                if not report:
+                    return
+
+                notif_svc = NotificationService()
+                title = f"【报告导出】{report.title}"
+                summary = report.summary or (report.content_markdown[:200] if report.content_markdown else "报告已导出，请查看附件。")
+                html_content = f"<p>主题：{report.title}</p><p>{summary}</p><p>附件：{filename}</p>"
+
+                await notif_svc.notify(
+                    session=sess,
+                    trigger="report_ready",
+                    title=title,
+                    content=html_content,
+                    attachments=[tmp_path],
+                )
+                logging.getLogger(__name__).info("Export notification sent for report %s", report_id)
+        finally:
+            # 清理临时文件
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to send export notification (report_id=%s): %s", report_id, e)

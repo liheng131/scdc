@@ -14,5 +14,7 @@ export * from './services/reports';
 export * from './services/templates';
 export * from './services/dataSources';
 export { collectedRecordsApi, type CollectedRecordInfo } from './services/dataSources';
-export { workflowApi, type WorkflowStartRequest, type WorkflowStartResponse, type WorkflowStatusResponse, type StageConfirmRequest, type StageConfirmResponse, type WorkflowStatusLightweightResponse, type StageName } from './services/workflow';
+export { workflowApi, type WorkflowStartRequest, type WorkflowStartResponse, type WorkflowStatusResponse } from './services/workflow';
 export { metricsApi, type MetricsData } from './services/metrics';
+export * from './services/parsers';
+export * from './services/attachments';

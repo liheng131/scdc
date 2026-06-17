@@ -3,6 +3,7 @@ import apiClient, { type ApiResponse } from '../client';
 export interface WorkflowStartRequest {
   topic: string;
   max_items?: number;
+  attachment_ids?: string[];
 }
 
 export interface ConversationMessage {
@@ -13,6 +14,8 @@ export interface ConversationMessage {
 export interface FollowUpRequest {
   message: string;
   conversation_history?: ConversationMessage[];
+  // 历史追问聚合 spec: 追问时携带父工作流 ID,用于在 DB 中建立父子关联
+  parent_workflow_id?: string;
 }
 
 export interface WorkflowStartResponse {
@@ -35,43 +38,7 @@ export interface WorkflowStatusResponse {
   stages: Record<string, any>;
   result: any;
   error?: string;
-  // Phase 2: 阶段状态机
-  stage_state?: 'running' | 'awaiting_confirmation' | 'completed' | 'failed';
-  stage_output?: any | null;
-  stage_history?: any[] | null;
 }
-
-// Phase 2: Human-in-the-Loop 阶段确认
-export interface StageConfirmRequest {
-  decision: 'accept' | 'reject' | 'skip';
-  user_edits?: {
-    extra_urls?: string[];
-    extra_keywords?: string[];
-  } | null;
-  user_feedback?: string | null;
-}
-
-export interface StageConfirmResponse {
-  workflow_id: string;
-  stage: string;
-  stage_state: string;
-  next_stage: string | null;
-  sse_url: string | null;
-  stage_history_length: number;
-}
-
-// Spec 2: 轻量化 workflow 状态查询响应（避免与上方 WorkflowStatusResponse 重名）
-export interface WorkflowStatusLightweightResponse {
-  workflow_id: string;
-  stage: string;
-  stage_state: string;
-  stage_output: any | null;
-  stage_history_length: number;
-  sse_url: string | null;
-}
-
-// Spec 2: 4 个合法的 stage 名称
-export type StageName = 'collecting' | 'cleaning' | 'analyzing' | 'reporting';
 
 export const workflowApi = {
   start: async (data: WorkflowStartRequest): Promise<ApiResponse<WorkflowStartResponse>> => {
@@ -82,34 +49,6 @@ export const workflowApi = {
   getStreamUrl: (workflowId: string): string => {
     const token = localStorage.getItem('token') || '';
     return `/api/v1/workflow/${workflowId}/stream?token=${encodeURIComponent(token)}`;
-  },
-
-  // Phase 2: 数据采集阶段单独 SSE 流 URL
-  getCollectingStreamUrl: (workflowId: string): string => {
-    const token = localStorage.getItem('token') || '';
-    return `/api/v1/workflow/${workflowId}/stream-collecting?token=${encodeURIComponent(token)}`;
-  },
-
-  // Spec 2: 通用 stage SSE 流 URL（覆盖 4 个阶段）
-  // stage ∈ 'collecting' | 'cleaning' | 'analyzing' | 'reporting'
-  getStreamUrlForStage: (workflowId: string, stage: StageName): string => {
-    const token = localStorage.getItem('token') || '';
-    return `/api/v1/workflow/${workflowId}/stream-${stage}?token=${encodeURIComponent(token)}`;
-  },
-
-  // Spec 2: 轻量化 workflow 状态查询（用于页面刷新恢复弹窗）
-  getWorkflowStatus: async (workflowId: string): Promise<ApiResponse<WorkflowStatusLightweightResponse>> => {
-    const res = await apiClient.get(`/api/v1/workflow/${workflowId}/status`);
-    return res.data;
-  },
-
-  // Phase 2: 阶段确认
-  confirmStage: async (
-    workflowId: string,
-    body: StageConfirmRequest
-  ): Promise<ApiResponse<StageConfirmResponse>> => {
-    const res = await apiClient.post(`/api/v1/workflow/${workflowId}/confirm`, body);
-    return res.data;
   },
 
   followUp: async (data: FollowUpRequest): Promise<ApiResponse<FollowUpResponse>> => {
@@ -132,16 +71,23 @@ export const workflowApi = {
     return res.data;
   },
 
-  reentryStream: async (workflowId: string, target_stage: string, user_feedback: string): Promise<Response> => {
-    const token = localStorage.getItem('token') || '';
-    const url = `/api/v1/workflow/${workflowId}/reentry?token=${encodeURIComponent(token)}`;
-    return fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ target_stage, user_feedback }),
-    });
+  updateWorkflowStatus: async (workflowId: string, status: string): Promise<ApiResponse<any>> => {
+    const res = await apiClient.patch(`/api/v1/workflow/${workflowId}/status`, { status });
+    return res.data;
+  },
+
+  deleteWorkflow: async (workflowId: string): Promise<ApiResponse<any>> => {
+    const res = await apiClient.delete(`/api/v1/workflow/${workflowId}`);
+    return res.data;
+  },
+
+  stopWorkflow: async (workflowId: string): Promise<ApiResponse<any>> => {
+    // 防止发送 pending_ 占位符 ID 到后端
+    if (workflowId.startsWith('pending_')) {
+      console.warn('[stopWorkflow] Skipping stop API call for pending workflow ID:', workflowId);
+      return { code: 200, data: { workflow_id: workflowId }, message: 'Skipped pending workflow' };
+    }
+    const res = await apiClient.post(`/api/v1/workflow/${workflowId}/stop`);
+    return res.data;
   },
 };

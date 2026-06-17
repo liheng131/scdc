@@ -1,5 +1,5 @@
 # Environments
-.env
+# .env
 .venv
 env/
 venv/
@@ -40,6 +40,7 @@ MANIFEST
 # Agent/Gemini files
 .agents/
 .gemini/
+.trae/
 
 # IDE
 .idea/

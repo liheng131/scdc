@@ -569,6 +569,7 @@ async function onRegisterSubmit() {
   color: var(--scdc-accent);
   cursor: pointer;
   white-space: nowrap;
+  -webkit-user-select: none;
   user-select: none;
 }
 .captcha-refresh:hover {

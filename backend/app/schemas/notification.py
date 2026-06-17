@@ -21,6 +21,11 @@ class NotificationRuleUpdate(BaseModel):
     target: Optional[str] = Field(None, max_length=255)
     enabled: Optional[bool] = None
 
+class ReportPushRequest(BaseModel):
+    report_id: int = Field(..., description="报告 ID")
+    target_email: Optional[str] = Field(None, description="目标邮箱地址（单推时必填）")
+    format: str = Field(default="pdf", description="导出格式: md/docx/pdf/pptx")
+
 class NotificationRuleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -15,6 +15,7 @@ from app.models.notification import NotificationRule
 from app.models.event_rule import EventRule
 from app.models.ai_model_config import AiModelConfig
 from app.models.workflow_run import WorkflowRun
+from app.models.attachment import Attachment  # noqa
 
 __all__ = [
     "Base",
@@ -28,5 +29,6 @@ __all__ = [
     "NotificationRule",
     "EventRule",
     "AiModelConfig",
-    "WorkflowRun"
+    "WorkflowRun",
+    "Attachment"
 ]

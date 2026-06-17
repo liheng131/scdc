@@ -19,14 +19,27 @@ import uuid
 from datetime import datetime
 
 # ============================================================
+# Constants
+# ============================================================
+
+# DimensionGenerator 失败时的回退维度集合（与旧版硬编码的 4 个默认维度一致）
+DEFAULT_DIMENSIONS: List[str] = [
+    "宏观经济环境",
+    "行业形势与趋势",
+    "细分板块分析",
+    "竞争格局与对手",
+]
+
+# ============================================================
 # Collector（采集）阶段
 # ============================================================
 
 class CollectorInput(BaseModel):
     task_id: str
     topic: str
-    max_items: int = Field(default=5, ge=1, le=20)
+    max_items: int = Field(default=20, ge=1, le=50)
     search_categories: Optional[List[str]] = None
+    attachment_ids: List[str] = Field(default_factory=list)  # 用户上传的附件 ID 列表
 
 class CollectedItem(BaseModel):
     source_type: str  # search / crawler / document / datasource
@@ -41,6 +54,8 @@ class CollectorOutput(BaseModel):
     items: List[CollectedItem] = []
     error: Optional[str] = None
     warning: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)  # 阶段元数据(如 user_attachment_count)
+    expanded_keywords: List[str] = Field(default_factory=list)  # 数据采集阶段 LLM 扩展的关键词
 
 # ============================================================
 # Cleaner（清洗）阶段
@@ -66,6 +81,14 @@ class CleanerOutput(BaseModel):
     cleaned_items: List[CleanedItem] = []
     total_removed: int = 0
     error: Optional[str] = None
+    cleaning_operations: Dict[str, int] = Field(
+        default_factory=lambda: {
+            "duplicates_removed": 0,
+            "low_quality_filtered": 0,
+            "format_standardized": 0,
+        },
+        description="清洗操作统计：重复移除数、低质量过滤数、格式标准化数",
+    )
 
 # ============================================================
 # Analyzer（分析）阶段
@@ -82,7 +105,8 @@ class AnalyzerInput(BaseModel):
     task_id: str
     topic: str
     cleaned_items: List[CleanedItem]
-    dimensions: List[str] = Field(default_factory=lambda: ["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"])
+    dimensions: List[str] = Field(default_factory=list)  # 由 Orchestrator 动态注入
+    expanded_keywords: List[str] = Field(default_factory=list)  # 由 Collector 阶段透传的扩展关键词,供 RAG 多关键词检索
 
 class AnalyzerOutput(BaseModel):
     task_id: str
@@ -91,6 +115,8 @@ class AnalyzerOutput(BaseModel):
     insights: List[Insight] = []
     error: Optional[str] = None
     degraded: bool = False
+    rag_results_count: int = 0  # RAG 检索结果数量
+    rag_results: List[Dict[str, Any]] = []  # RAG 结果摘要列表，每项包含 title, content_snippet, relevance_score
 
 # ============================================================
 # Reporter（报告）阶段
@@ -120,6 +146,10 @@ class ReporterOutput(BaseModel):
     sections: List[ReportSection] = []
     chart_configs: List[Dict[str, Any]] = []
     chart_images: List[Dict[str, str]] = []
+    dimension_illustrations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="维度配图数据列表，格式: [{'section': str, 'title': str, 'base64': str, 'position': int}]"
+    )
     error: Optional[str] = None
     degraded: bool = False
 
@@ -130,8 +160,8 @@ class ReporterOutput(BaseModel):
 class OrchestratorInput(BaseModel):
     task_id: str
     topic: str
-    max_items: int = Field(default=5, ge=1, le=20)
-    min_content_length: int = 20
+    max_items: int = Field(default=10, ge=1, le=20)
+    min_content_length: int = 10
     include_charts: bool = True
     dimensions: List[str] = Field(default_factory=list)
     start_stage: Optional[str] = None

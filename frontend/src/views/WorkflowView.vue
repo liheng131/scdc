@@ -1,16 +1,44 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { Promotion, Download, CopyDocument, Delete, Refresh, Plus, Close } from '@element-plus/icons-vue';
+import {
+  Promotion,        // 发送(向上箭头)
+  VideoPause,       // 暂停(运行中)
+  Paperclip,        // 附件(回形针)
+  Download, CopyDocument, Delete, Plus, Close, Document,
+} from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import * as echarts from 'echarts';
 import { workflowApi, reportsApi } from '../api';
-import { useWorkflowStore, type ConfirmContext } from '../stores/workflow';
+import { parsersApi } from '../api/services/parsers';
+import { useWorkflowStore } from '../stores/workflow';
 import { useAuthStore } from '@/stores/auth';
-import StageConfirmDialog from '../components/StageConfirmDialog.vue';
+import StageProgressBar from '../components/StageProgressBar.vue';
+import StageDetailDialog from '../components/StageDetailDialog.vue';
 
 const auth = useAuthStore();
 const { t } = useI18n();
+
+// 附件上传相关常量
+const ACCEPTED_EXTENSIONS = '.pdf,.doc,.docx,.md,.markdown,.txt,.png,.jpg,.jpeg,.bmp,.tiff,.tif,.xls,.xlsx';
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+
+interface PendingAttachment {
+  key: string; // 本地 v-for key
+  file: File;
+  status: 'pending' | 'uploading' | 'done' | 'error';
+  progress: number; // 0-100,-1 表示失败
+  attachment_id?: string;
+  error?: string;
+}
+
+/** 消息中已发送的附件(展示在用户消息 bubble 内) */
+interface SentAttachment {
+  attachment_id: string;
+  filename: string;
+  file_size: number;
+  file_type: string;
+}
 
 interface StageHint {
   icon: string;
@@ -28,6 +56,199 @@ const chartRefs = ref<Map<number, HTMLElement>>(new Map());
 const showSidebar = ref(false);
 const currentWorkflowId = ref<string | null>(null);
 const reportIdCache = ref<Record<string, number>>({});
+
+// 四阶段进度条相关
+const WORKFLOW_STAGES = [
+  { key: 'collecting', label: '数据采集', icon: '' },
+  { key: 'cleaning', label: '数据清洗', icon: '🧹' },
+  { key: 'analyzing', label: '数据分析', icon: '📊' },
+  { key: 'reporting', label: '报告生成', icon: '📝' },
+];
+
+// 阶段详情弹窗
+const detailDialogVisible = ref(false);
+const detailStageKey = ref('');
+const detailStageName = ref('');
+const detailStageData = ref<any>(null);
+
+const handleStageDetail = (stageKey: string) => {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (!lastMsg?.stageDetails?.[stageKey]) return;
+  const stageDef = WORKFLOW_STAGES.find(s => s.key === stageKey);
+  detailStageKey.value = stageKey;
+  detailStageName.value = stageDef?.label || stageKey;
+  // 传递完整的 { summary, detail } 对象，summary 含 duration_seconds，detail 含具体内容
+  detailStageData.value = lastMsg.stageDetails[stageKey];
+  detailDialogVisible.value = true;
+};
+
+// 从 stageDetails 构建 hover tooltip 摘要
+const stageSummaries = computed(() => {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (!lastMsg?.stageDetails) return {};
+  const summaries: Record<string, { text: string }> = {};
+  const details = lastMsg.stageDetails;
+  if (details.collecting?.summary) {
+    const s = details.collecting.summary;
+    summaries.collecting = { text: `耗时 ${s.duration_seconds || 0} 秒 | 搜索 ${s.keywords_count || 0} 个关键词，共 ${s.total_search_results || 0} 条结果，采集 ${s.item_count || 0} 条` };
+  }
+  if (details.cleaning?.summary) {
+    const s = details.cleaning.summary;
+    summaries.cleaning = { text: `耗时 ${s.duration_seconds || 0} 秒 | 清洗 ${s.total_in || 0} 条数据，保留 ${s.total_out || 0} 条，移除 ${s.removed_count || 0} 条` };
+  }
+  if (details.analyzing?.summary) {
+    const s = details.analyzing.summary;
+    summaries.analyzing = { text: `耗时 ${s.duration_seconds || 0} 秒 | RAG 命中 ${s.rag_results_count || 0} 条，分析 ${s.insight_count || 0} 条洞察，覆盖 ${s.dimensions?.length || 0} 个维度` };
+  }
+  if (details.reporting?.summary) {
+    const s = details.reporting.summary;
+    summaries.reporting = { text: `耗时 ${s.duration_seconds || 0} 秒 | 报告 ${s.report_length || 0} 字，${s.chart_count || 0} 张图表` };
+  }
+  return summaries;
+});
+
+// 附件上传状态
+const pendingAttachments = ref<PendingAttachment[]>([]);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const isDragOver = ref(false);
+
+// 格式化文件大小
+const formatFileSize = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+};
+
+// 触发文件选择
+const triggerFileInput = () => {
+  fileInputRef.value?.click();
+};
+
+// 文件 input change
+const onFileInputChange = (e: Event) => {
+  const input = e.target as HTMLInputElement;
+  if (input.files) {
+    addFiles(Array.from(input.files));
+    input.value = ''; // 重置,允许选择同一文件
+  }
+};
+
+// 添加文件到待上传列表
+const addFiles = (files: File[]) => {
+  for (const file of files) {
+    // 验证扩展名
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+    if (!ACCEPTED_EXTENSIONS.includes(ext)) {
+      ElMessage.warning(`不支持的文件格式: ${file.name}`);
+      continue;
+    }
+    // 验证大小
+    if (file.size > MAX_FILE_SIZE) {
+      ElMessage.warning(`文件过大（>20MB）: ${file.name}`);
+      continue;
+    }
+    pendingAttachments.value.push({
+      key: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      file,
+      status: 'pending',
+      progress: 0,
+    });
+  }
+};
+
+// 移除待上传附件
+const removeAttachment = (key: string) => {
+  pendingAttachments.value = pendingAttachments.value.filter(a => a.key !== key);
+};
+
+// 拖拽相关
+const onDragOver = (e: DragEvent) => {
+  e.preventDefault();
+  isDragOver.value = true;
+};
+
+const onDragLeave = (e: DragEvent) => {
+  e.preventDefault();
+  isDragOver.value = false;
+};
+
+const onDrop = (e: DragEvent) => {
+  e.preventDefault();
+  isDragOver.value = false;
+  if (e.dataTransfer?.files) {
+    addFiles(Array.from(e.dataTransfer.files));
+  }
+};
+
+// 上传所有待上传附件并返回 attachment_ids
+const uploadPendingAttachments = async (): Promise<string[]> => {
+  if (pendingAttachments.value.length === 0) return [];
+  // 进入 uploading 状态
+  pendingAttachments.value.forEach(a => {
+    a.status = 'uploading';
+    a.progress = 0;
+  });
+  try {
+    const files = pendingAttachments.value.map(a => a.file);
+    // 串行上传,逐文件回传进度(成熟 AI 平台惯例)
+    const res = await parsersApi.batchUpload(files, (filename, percent) => {
+      const att = pendingAttachments.value.find(a => a.file.name === filename);
+      if (!att) return;
+      if (percent < 0) {
+        att.status = 'error';
+        att.error = 'Upload failed';
+      } else {
+        att.progress = percent;
+        if (percent >= 100) {
+          att.status = 'done';
+        }
+      }
+    });
+    if (res.data) {
+      const successList = res.data.success || [];
+      const failedList = res.data.failed || [];
+
+      // 标记每个文件的上传状态
+      pendingAttachments.value.forEach((a) => {
+        const ok = successList.find(s => s.filename === a.file.name);
+        if (ok) {
+          a.status = 'done';
+          a.attachment_id = ok.attachment_id;
+          a.progress = 100;
+        } else {
+          a.status = 'error';
+          a.error = 'Upload failed';
+        }
+      });
+
+      const attachmentIds = res.data.attachment_ids || [];
+
+      if (failedList.length > 0) {
+        ElMessage.warning(`部分文件上传失败: ${failedList.map(f => f.filename).join(', ')}`);
+      }
+      return attachmentIds;
+    }
+    return [];
+  } catch (e: any) {
+    pendingAttachments.value.forEach(a => {
+      a.status = 'error';
+      a.error = e?.message || 'Upload failed';
+    });
+    throw e;
+  }
+};
+
+/** 把已上传好的附件整理为 SentAttachment,准备塞进用户消息 */
+const snapshotSentAttachments = (attachmentIds: string[]): SentAttachment[] => {
+  return pendingAttachments.value
+    .filter(a => a.status === 'done' && a.attachment_id && attachmentIds.includes(a.attachment_id))
+    .map(a => ({
+      attachment_id: a.attachment_id!,
+      filename: a.file.name,
+      file_size: a.file.size,
+      file_type: (a.file.name.split('.').pop() || '').toLowerCase(),
+    }));
+};
 
 const messages = computed(() => {
   return workflowStore.activeConversation?.messages || [];
@@ -61,6 +282,7 @@ onUnmounted(() => {
     slowHintTimer = null;
   }
   showSlowHint.value = false;
+  pendingAttachments.value = [];
   chartRefs.value.forEach((el) => {
     const instance = echarts.getInstanceByDom(el);
     if (instance) instance.dispose();
@@ -70,10 +292,7 @@ onUnmounted(() => {
 watch(() => workflowStore.activeConversationId, () => {
   showSidebar.value = false;
   nextTick(() => {
-    chartRefs.value.forEach((el) => {
-      const instance = echarts.getInstanceByDom(el);
-      if (instance) instance.dispose();
-    });
+    // 不显式 dispose,让 renderChartsForMessages 在渲染新图表时自动处理
     chartRefs.value.clear();
     scrollToBottom();
     nextTick(() => {
@@ -100,17 +319,13 @@ const inputPlaceholder = computed(() => {
   return isFollowUpMode.value ? '输入追问...' : '输入你想分析的市场主题...';
 });
 
-const buttonText = computed(() => {
-  return isFollowUpMode.value ? '发送' : '开始分析';
-});
-
 const quickAsk = (topic: string) => {
   inputTopic.value = topic;
   sendMessage();
 };
 
-const handleStop = () => {
-  workflowStore.stopWorkflow();
+const handleStop = async () => {
+  await workflowStore.stopWorkflow();
   loading.value = false;
   if (slowHintTimer) {
     clearTimeout(slowHintTimer);
@@ -120,72 +335,8 @@ const handleStop = () => {
   currentStageHint.value = null;
 };
 
-// Phase 2 + Spec 2: 阶段确认后续流转
-// accept → next_stage=X → 启动 X 阶段 SSE 流（4 阶段都走 stage-specific 端点）
-// reject → next_stage=current_stage → 启动当前阶段 SSE 流
-// Spec 2 跳过: shouldAutoSkip 命中 → 不弹窗，自动 confirm with decision='skip'
+// 阶段回调 (统一四阶段连续执行,无人工审阅)
 const buildStreamCallbacks = (convId: string, assistantIdx: number, isFollowUp: boolean) => {
-  const onAwaitingConfirmation = (data: any) => {
-    loading.value = false;
-    showSlowHint.value = false;
-    if (slowHintTimer) {
-      clearTimeout(slowHintTimer);
-      slowHintTimer = null;
-    }
-    currentStageHint.value = null;
-
-    const conv = workflowStore.activeConversation;
-    const ctxAssistantIdx = isFollowUp
-      ? (conv ? conv.messages.length - 1 : 1)
-      : assistantIdx;
-    const wfId = workflowStore.runningWorkflowId || '';
-
-    // Spec 2: 跳过模式检查
-    if (workflowStore.shouldAutoSkip(wfId)) {
-      // 不弹窗，自动 skip
-      workflowApi.confirmStage(wfId, { decision: 'skip' })
-        .then((resp) => {
-          const nextStage = (resp.data as any)?.next_stage || null;
-          // 紧接着启动下一阶段
-          if (nextStage) {
-            // 立即递归调用下一阶段流（保持 loading）
-            loading.value = true;
-            currentStageHint.value = { icon: stageIconFor(nextStage), label: stageLabelFor(nextStage) };
-            scrollToBottom();
-            // 使用宏任务让 UI 有机会更新提示
-            setTimeout(() => {
-              workflowStore.startStageStream(
-                conv ? conv.id : convId,
-                ctxAssistantIdx,
-                wfId,
-                nextStage as any,
-                buildStreamCallbacks(conv ? conv.id : convId, ctxAssistantIdx, isFollowUp)
-              );
-            }, 100);
-          } else {
-            ElMessage.info('已自动接受所有阶段，工作流完成');
-          }
-        })
-        .catch((e: any) => {
-          const msg = e?.response?.data?.detail || e?.message || '自动跳过失败';
-          ElMessage.error(msg);
-          loading.value = false;
-        });
-      return;
-    }
-
-    // 正常弹窗
-    const ctx: ConfirmContext = {
-      workflowId: wfId,
-      convId: conv ? conv.id : convId,
-      assistantIdx: ctxAssistantIdx,
-      stage: data.stage,
-      stageOutput: data.stage_output || {},
-      stageHistoryLength: data.stage_history_length || 0,
-    };
-    workflowStore.showConfirmDialog(ctx);
-  };
-
   return {
     onStageStart: (data: any) => {
       showSlowHint.value = false;
@@ -225,87 +376,16 @@ const buildStreamCallbacks = (convId: string, assistantIdx: number, isFollowUp: 
       currentStageHint.value = null;
       ElMessage.error(`工作流异常: ${data.error}`);
     },
-    onAwaitingConfirmation,
   };
 };
 
-// 阶段图标/标签辅助（用于 skip 自动重入时的提示）
-const STAGE_META: Record<string, StageHint> = {
-  collecting: { icon: '🔍', label: '数据采集' },
-  cleaning: { icon: '🧹', label: '数据清洗' },
-  analyzing: { icon: '🧠', label: '分析洞察' },
-  reporting: { icon: '📝', label: '生成报告' },
-};
-const stageIconFor = (stage: string) => STAGE_META[stage]?.icon || '⚙️';
-const stageLabelFor = (stage: string) => STAGE_META[stage]?.label || stage;
-
-const startNextStageStream = (
-  convId: string,
-  assistantIdx: number,
-  workflowId: string,
-  nextStage: string | null,
-  isFollowUp: boolean,
-) => {
-  if (!nextStage) {
-    return;
-  }
-  // Spec 2: 4 阶段都用 stage-specific 端点
-  if (nextStage in STAGE_META) {
-    workflowStore.startStageStream(
-      convId,
-      assistantIdx,
-      workflowId,
-      nextStage as any,
-      buildStreamCallbacks(convId, assistantIdx, isFollowUp)
-    );
-  } else {
-    // 兜底：未知 stage
-    workflowStore.startStageStream(
-      convId,
-      assistantIdx,
-      workflowId,
-      'collecting',
-      buildStreamCallbacks(convId, assistantIdx, isFollowUp)
-    );
-  }
-};
-
-const handleConfirmDialogConfirmed = (data: { ctx: ConfirmContext; response: any; decision: 'accept' | 'reject' }) => {
-  const { ctx, response } = data;
-  // 防御性兜底:dialog 内部 race condition 偶尔会让 ctx 为 null(理论上已修,这里双保险)
-  if (!ctx) {
-    console.warn('[handleConfirmDialogConfirmed] ctx is null, abort next-stage stream');
-    return;
-  }
-  const nextStage = response?.next_stage as string | null | undefined;
-  loading.value = true;
-  showSlowHint.value = false;
-  if (slowHintTimer) {
-    clearTimeout(slowHintTimer);
-    slowHintTimer = null;
-  }
-  // 推断 isFollowUp（弹窗场景下重置跳过标记除外）
-  const isFollowUp = !!workflowStore.activeConversation
-    && workflowStore.activeConversation.messages.length > 0
-    && workflowStore.activeConversation.status === 'completed';
-  startNextStageStream(ctx.convId, ctx.assistantIdx, ctx.workflowId, nextStage || null, isFollowUp);
-};
-
-const handleConfirmDialogCancelled = () => {
-  loading.value = false;
-  currentStageHint.value = null;
-  showSlowHint.value = false;
-  if (slowHintTimer) {
-    clearTimeout(slowHintTimer);
-    slowHintTimer = null;
-  }
-};
-
-const sendMessage = () => {
+const sendMessage = async () => {
   const topic = inputTopic.value.trim();
   if (!topic || loading.value) return;
 
   workflowStore.clearEventSource();
+  // 重置取消标志，确保新消息能正常启动流
+  workflowStore.streamCancelled = false;
   currentStageHint.value = null;
   if (slowHintTimer) {
     clearTimeout(slowHintTimer);
@@ -313,37 +393,64 @@ const sendMessage = () => {
   }
   showSlowHint.value = false;
 
-  const activeConv = workflowStore.activeConversation;
-  // Phase 7 修复:3 态分支,避免用户点击"待开始"对话后被强制新建
-  //   - 无活动对话（点过"新建对话"）→ 走新建分支
-  //   - 活动对话是 idle/empty（点过侧边栏一个还没开始过的对话）→ 复用它,不要新建
-  //   - 活动对话 completed 且有消息 → 追问
-  //   - 活动对话 running/failed → 新建（避免和正在跑的 SSE 流冲撞,旧 conv 保留作为历史）
-  // Phase 7 增强:即使用户没点过侧边栏（停留在 welcome 屏）且 activeConv=null,
-  //   也要复用最近的 idle conv,解决"凭空冒出一堆同名空对话"问题
-  //   - 找:conversations 列表里 status='idle' 且 messages=[] 的最新一条
-  //   - 没找到:首次使用 / 列表里只有 running/failed/completed → 走真新建
-  const reuseFromList: Conversation | null = !activeConv
-    ? workflowStore.conversations.find(c => c.messages.length === 0 && c.status === 'idle') || null
-    : null;
-  // 真正的"待复用对话":优先 activeConv（已选中）> 列表里最近的 idle conv
-  const targetConv: Conversation | null = (() => {
-    if (activeConv) {
-      if (activeConv.messages.length === 0 && activeConv.status === 'idle') return activeConv;
-      return null; // activeConv 处于其他状态,sendMessage 走其他分支(followup/new)
+  // 1) 先上传附件（如有）
+  let attachmentIds: string[] = [];
+  let sentAttachments: SentAttachment[] = [];
+  if (pendingAttachments.value.length > 0) {
+    try {
+      attachmentIds = await uploadPendingAttachments();
+      sentAttachments = snapshotSentAttachments(attachmentIds);
+    } catch (e: any) {
+      ElMessage.error('附件上传失败，请重试');
+      loading.value = false;
+      return;
     }
-    return reuseFromList; // activeConv=null 时 fallback 到列表里的 idle conv
-  })();
-  const isIdleEmpty = !!targetConv; // 复用分支条件:有可复用的目标对话
-  const isFollowUp = !!activeConv && activeConv.messages.length > 0 && activeConv.status === 'completed';
+  }
+
+  const activeConv = workflowStore.activeConversation;
+  // 3 态分支:
+  //   - 活动对话 messages 长度 > 0 → 追问(不强制要求 status === 'completed',
+  //     因为失败/运行中断/未关联服务端的对话也可以让用户接着发追问,后端会新建子工作流)
+  //   - 活动对话 idle 且空(点过侧边栏一个还没开始过的对话)→ 复用它
+  //   - 其他(activeConv=null 或 status==='running')→ 新建对话
+  //
+  // 新建对话行为(参照智谱/DeepSeek):
+  //   - 点"新建对话"只清空 activeConv 回到欢迎屏,不创建侧边栏记录
+  //   - 在欢迎屏提问时走 else 分支,此时才真正创建对话记录
+  const isFollowUp = !!activeConv && activeConv.messages.length > 0 && activeConv.status !== 'running';
+  const isIdleEmpty = !!activeConv && activeConv.messages.length === 0 && activeConv.status === 'idle';
 
   inputTopic.value = '';
   loading.value = true;
   scrollToBottom();
 
-  if (isFollowUp && activeConv) {
+  if (isFollowUp) {
     // 追问模式：在当前对话中追加消息
-    activeConv.messages.push({ role: 'user', content: topic });
+    // 历史追问聚合 spec: 解析父工作流 ID 用于建立 DB 父子关联
+    //   - activeConv.id 以 'server_' 开头 → 取去掉前缀的部分
+    //   - 否则取 activeConv.serverWorkflowId(第一次提问时回填的服务端 ID)
+    //   - 都没有(异常状态)→ 退回到新建对话模式
+    let parentWorkflowId: string | null = null;
+    if (activeConv.id.startsWith('server_')) {
+      parentWorkflowId = activeConv.id.slice('server_'.length);
+    } else if (activeConv.serverWorkflowId) {
+      parentWorkflowId = activeConv.serverWorkflowId;
+    }
+
+    if (!parentWorkflowId) {
+      // 本地未提交过的对话或异常状态:按 spec 规约回退到新建对话并提问
+      ElMessage.warning('该对话尚未与服务端关联,将以新对话形式发送');
+      const newConv = workflowStore.createConversation(topic);
+      workflowStore.initConversationMessages(newConv.id, topic, sentAttachments);
+      loading.value = false;
+      return;
+    }
+
+    activeConv.messages.push({
+      role: 'user',
+      content: topic,
+      attachments: sentAttachments.length > 0 ? sentAttachments : undefined,
+    });
     activeConv.messages.push({
       role: 'assistant',
       content: '',
@@ -359,15 +466,34 @@ const sendMessage = () => {
 
     const cbs = buildStreamCallbacks(activeConv.id, assistantIdx, isFollowUp);
 
-    workflowApi.followUp({ message: topic, conversation_history: conversationHistory })
+    const followUpBody: { message: string; conversation_history: { role: string; content: string }[]; attachment_ids?: string[]; parent_workflow_id: string } = {
+      message: topic,
+      conversation_history: conversationHistory,
+      parent_workflow_id: parentWorkflowId,
+    };
+    if (attachmentIds.length > 0) {
+      followUpBody.attachment_ids = attachmentIds;
+    }
+    // 提前设置 runningWorkflowId 占位，让停止按钮在 API 返回前就能生效
+    const pendingWfId = `pending_${activeConv.id}_${Date.now()}`;
+    workflowStore.runningWorkflowId = pendingWfId;
+    workflowApi.followUp(followUpBody)
       .then((res) => {
-        workflowStore.startStageStream(
+        // 检查是否在 API 返回前用户已点击停止
+        if (workflowStore.streamCancelled) {
+          loading.value = false;
+          workflowStore.runningWorkflowId = null;
+          return;
+        }
+        workflowStore.runningWorkflowId = res.data.workflow_id;
+        workflowStore.startWorkflowStream(
           activeConv.id,
           assistantIdx,
           res.data.workflow_id,
-          'collecting',
           cbs,
         );
+        // 追问已启动,清理附件列表
+        pendingAttachments.value = [];
       })
       .catch(() => {
         activeConv.messages.pop();
@@ -379,33 +505,50 @@ const sendMessage = () => {
         ElMessage.error('追问失败，请重试');
         loading.value = false;
       });
-  } else if (isIdleEmpty && targetConv) {
-    // 复用分支:用户在侧边栏点了一个待开始的空对话,或停留在 welcome 屏输主题
-    // → 直接在那个 idle conv 里启动分析,避免凭空创建新对话
-    // 优先用 activeConv(已选中),否则用 reuseFromList 找出的最近 idle conv
-    if (!activeConv) {
-      // welcome 屏路径:需要把目标 conv 设为 active,这样 UI 会从 welcome 屏切走
-      workflowStore.setActiveConversation(targetConv.id);
-    }
-    targetConv.messages.push({ role: 'user', content: topic });
-    targetConv.messages.push({
+  } else if (isIdleEmpty) {
+    // 复用分支:用户在侧边栏点了一个待开始的空对话
+    activeConv.messages.push({
+      role: 'user',
+      content: topic,
+      attachments: sentAttachments.length > 0 ? sentAttachments : undefined,
+    });
+    activeConv.messages.push({
       role: 'assistant',
       content: '',
       reportMarkdown: '',
       chartOptions: [],
     });
-    targetConv.status = 'running';
+    activeConv.status = 'running';
 
     const assistantIdx = 1;
-    const cbs = buildStreamCallbacks(targetConv.id, assistantIdx, isFollowUp);
+    const cbs = buildStreamCallbacks(activeConv.id, assistantIdx, isFollowUp);
 
-    workflowApi.start({ topic, max_items: 5 })
+  const startBody: { topic: string; max_items?: number; attachment_ids?: string[] } = {
+      topic,
+      max_items: 10,  // 与后端 WorkflowStartRequest 默认值一致
+    };
+    if (attachmentIds.length > 0) {
+      startBody.attachment_ids = attachmentIds;
+    }
+
+    // 提前设置 runningWorkflowId 占位，让停止按钮在 API 返回前就能生效
+    const pendingWfId = `pending_${activeConv.id}_${Date.now()}`;
+    workflowStore.runningWorkflowId = pendingWfId;
+    workflowApi.start(startBody)
       .then((res) => {
-        workflowStore.startStageStream(
-          targetConv.id,
+        // 检查是否在 API 返回前用户已点击停止
+        if (workflowStore.streamCancelled) {
+          loading.value = false;
+          workflowStore.runningWorkflowId = null;
+          return;
+        }
+        workflowStore.runningWorkflowId = res.data.workflow_id;
+        // 历史追问聚合 spec: 回填服务端 workflow_id,后续追问可作为 parent 关联
+        activeConv.serverWorkflowId = res.data.workflow_id;
+        workflowStore.startWorkflowStream(
+          activeConv.id,
           assistantIdx,
           res.data.workflow_id,
-          'collecting',
           cbs,
         );
 
@@ -414,10 +557,12 @@ const sendMessage = () => {
         slowHintTimer = setTimeout(() => {
           showSlowHint.value = true;
         }, 60000);
+        // 工作流已启动,清理附件列表
+        pendingAttachments.value = [];
       })
       .catch(() => {
-        targetConv.messages.pop();
-        targetConv.status = 'idle';
+        activeConv.messages.pop();
+        activeConv.status = 'idle';
         if (slowHintTimer) {
           clearTimeout(slowHintTimer);
           slowHintTimer = null;
@@ -427,27 +572,42 @@ const sendMessage = () => {
         loading.value = false;
       });
   } else {
-    // 首次分析模式：创建新对话
+    // 首次分析模式：创建新对话（此时 activeConv=null 或 running/failed）
+    // 参照智谱/DeepSeek: 只有用户实际提问时才创建侧边栏记录
     const conv = workflowStore.createConversation(topic);
 
-    conv.messages.push({ role: 'user', content: topic });
-    conv.messages.push({
-      role: 'assistant',
-      content: '',
-      reportMarkdown: '',
-      chartOptions: [],
-    });
+    // 使用 store 方法确保 Vue 响应式正确追踪
+    workflowStore.initConversationMessages(conv.id, topic, sentAttachments);
 
     const assistantIdx = 1;
     const cbs = buildStreamCallbacks(conv.id, assistantIdx, isFollowUp);
 
-    workflowApi.start({ topic, max_items: 5 })
+  const startBody: { topic: string; max_items?: number; attachment_ids?: string[] } = {
+      topic,
+      max_items: 10,  // 与后端 WorkflowStartRequest 默认值一致
+    };
+    if (attachmentIds.length > 0) {
+      startBody.attachment_ids = attachmentIds;
+    }
+
+    // 提前设置 runningWorkflowId 占位，让停止按钮在 API 返回前就能生效
+    const pendingWfId = `pending_${conv.id}_${Date.now()}`;
+    workflowStore.runningWorkflowId = pendingWfId;
+    workflowApi.start(startBody)
       .then((res) => {
-        workflowStore.startStageStream(
+        // 检查是否在 API 返回前用户已点击停止
+        if (workflowStore.streamCancelled) {
+          loading.value = false;
+          workflowStore.runningWorkflowId = null;
+          return;
+        }
+        workflowStore.runningWorkflowId = res.data.workflow_id;
+        // 历史追问聚合 spec: 回填服务端 workflow_id,后续追问可作为 parent 关联
+        conv.serverWorkflowId = res.data.workflow_id;
+        workflowStore.startWorkflowStream(
           conv.id,
           assistantIdx,
           res.data.workflow_id,
-          'collecting',
           cbs,
         );
 
@@ -456,9 +616,11 @@ const sendMessage = () => {
         slowHintTimer = setTimeout(() => {
           showSlowHint.value = true;
         }, 60000);
+        // 工作流已启动,清理附件列表
+        pendingAttachments.value = [];
       })
       .catch(() => {
-        conv.messages.pop();
+        workflowStore.rollbackConversationMessages(conv.id);
         if (slowHintTimer) {
           clearTimeout(slowHintTimer);
           slowHintTimer = null;
@@ -490,6 +652,8 @@ const handleNewConversation = async () => {
     }
     showSlowHint.value = false;
   }
+  // 参照智谱/DeepSeek: 点击"新建对话"只清空当前状态回到欢迎屏,不创建侧边栏记录。
+  // 重复点击无害(activeConv 已经是 null)。
   workflowStore.resetActiveConversation();
 };
 
@@ -504,14 +668,14 @@ const handleDeleteConversation = async (id: string) => {
       cancelButtonText: '取消',
       type: 'warning',
     });
-    workflowStore.deleteConversation(id);
+    await workflowStore.deleteConversation(id);
     ElMessage.success('已删除');
   } catch {
     // cancelled
   }
 };
 
-const handleExportReport = async (markdown: string, fmt: string) => {
+const handleExportReport = async (markdown: string, fmt: string, template_id?: string) => {
   if (fmt === 'md') {
     if (!markdown) return;
     const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
@@ -563,7 +727,7 @@ const handleExportReport = async (markdown: string, fmt: string) => {
     }
   }
 
-  const exportUrl = reportsApi.exportReportUrl(reportId, fmt);
+  const exportUrl = reportsApi.exportReportUrl(reportId, fmt, template_id);
   try {
     const response = await fetch(exportUrl, {
       headers: reportsApi.getExportHeaders(),
@@ -581,6 +745,27 @@ const handleExportReport = async (markdown: string, fmt: string) => {
     ElMessage.error('导出失败，请重试');
   }
 };
+
+// PPT 模板列表（用于导出对话框二级菜单）
+interface PptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  file: string;
+  layouts_count: number;
+}
+const pptTemplates = ref<PptTemplate[]>([]);
+const loadPptTemplates = async () => {
+  try {
+    const res = await reportsApi.listPptTemplates();
+    pptTemplates.value = (res.data?.items || []) as PptTemplate[];
+  } catch {
+    pptTemplates.value = [];
+  }
+};
+onMounted(() => {
+  loadPptTemplates();
+});
 
 const handleCopyReport = (markdown: string) => {
   if (!markdown) return;
@@ -621,14 +806,6 @@ const formatTime = (ts: number) => {
   return d.toLocaleDateString('zh-CN');
 };
 
-const getStatusBadge = (status: string) => {
-  switch (status) {
-    case 'running': return { text: '执行中', class: 'status-running' };
-    case 'completed': return { text: '已完成', class: 'status-completed' };
-    case 'failed': return { text: '失败', class: 'status-failed' };
-    default: return { text: '待开始', class: 'status-idle' };
-  }
-};
 </script>
 
 <template>
@@ -645,7 +822,6 @@ const getStatusBadge = (status: string) => {
       </div>
       <div class="sidebar-divider">
         <span>历史记录</span>
-        <el-button text size="small" :icon="Refresh" @click="workflowStore.loadHistoryFromServer()" />
       </div>
       <div class="history-list">
         <div v-if="workflowStore.conversations.length === 0" class="history-empty">
@@ -660,9 +836,6 @@ const getStatusBadge = (status: string) => {
           <div class="history-item-content">
             <div class="history-item-title">{{ conv.topic }}</div>
             <div class="history-item-meta">
-              <span :class="['status-badge', getStatusBadge(conv.status).class]">
-                {{ getStatusBadge(conv.status).text }}
-              </span>
               <span class="history-item-time">{{ formatTime(conv.updatedAt) }}</span>
             </div>
           </div>
@@ -670,6 +843,7 @@ const getStatusBadge = (status: string) => {
             text
             size="small"
             :icon="Delete"
+            aria-label="删除对话"
             class="history-item-delete"
             @click.stop="handleDeleteConversation(conv.id)"
           />
@@ -714,15 +888,60 @@ const getStatusBadge = (status: string) => {
         </div>
 
         <template v-for="(msg, idx) in messages" :key="idx">
+          <!-- 用户消息行 -->
           <div v-if="msg.role === 'user'" class="message-row user-row">
-            <div class="message-avatar user-avatar">👤</div>
-            <div class="message-bubble user-bubble">{{ msg.content }}</div>
+            <div class="message-avatar user-avatar">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z" fill="white"/>
+              </svg>
+            </div>
+            <div class="message-body user-message-body">
+              <div class="message-sender user-sender">
+                <span class="sender-name">我</span>
+              </div>
+              <div v-if="msg.attachments && msg.attachments.length" class="user-attachments">
+                <div
+                  v-for="att in msg.attachments"
+                  :key="att.attachment_id"
+                  class="user-attachment-card"
+                  :title="att.filename"
+                >
+                  <div class="att-icon">
+                    <el-icon><Document /></el-icon>
+                  </div>
+                  <div class="att-meta">
+                    <div class="att-name">{{ att.filename }}</div>
+                    <div class="att-sub">{{ (att.file_type || '').toUpperCase() }} · {{ formatFileSize(att.file_size) }}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="message-content user-content">{{ msg.content }}</div>
+            </div>
           </div>
 
+          <!-- AI 消息行 -->
           <div v-else class="message-row assistant-row">
-            <div class="message-avatar assistant-avatar">🤖</div>
+            <div class="message-avatar assistant-avatar">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 6C13.66 6 15 7.34 15 9C15 10.66 13.66 12 12 12C10.34 12 9 10.66 9 9C9 7.34 10.34 6 12 6ZM12 20C9.33 20 7.12 18.29 6.34 16C7.72 14.72 9.78 14 12 14C14.22 14 16.28 14.72 17.66 16C16.88 18.29 14.67 20 12 20Z" fill="white"/>
+              </svg>
+            </div>
             <div class="message-body">
-              <div v-if="msg.stageHint" class="stage-hint-banner">
+              <div class="message-sender assistant-sender">
+                <span class="sender-name">AI 助手</span>
+                <span class="sender-badge">AI</span>
+              </div>
+              <div v-if="msg.terminated" class="terminated-hint">本次回答已终止</div>
+              <!-- 四阶段进度条（仅非直答模式且正在运行或已完成时显示） -->
+              <StageProgressBar
+                v-if="!msg.isDirectResponse && msg.stageStatuses"
+                :stages="WORKFLOW_STAGES"
+                :currentStage="msg.currentStage || ''"
+                :stageStatuses="msg.stageStatuses"
+                :stageSummaries="stageSummaries"
+                @detail="handleStageDetail"
+              />
+              <div v-if="msg.stageHint && !msg.stageStatuses" class="stage-hint-banner">
                 <span class="stage-pulse"></span>
                 <span>{{ msg.stageHint }}</span>
               </div>
@@ -754,7 +973,7 @@ const getStatusBadge = (status: string) => {
               </div>
               <div
                 v-if="msg.content"
-                class="message-bubble assistant-bubble report-body"
+                class="message-content assistant-content report-body"
                 v-html="msg.content"
               ></div>
               <div v-if="msg.chartOptions && msg.chartOptions.length" class="charts-section">
@@ -769,16 +988,27 @@ const getStatusBadge = (status: string) => {
                 <el-button size="small" text :icon="CopyDocument" @click="handleCopyReport(msg.reportMarkdown!)">
                   复制
                 </el-button>
-                <el-dropdown trigger="click" @command="(fmt: string) => handleExportReport(msg.reportMarkdown!, fmt)">
+                <el-dropdown trigger="click" @command="(cmd: {fmt: string; template_id?: string}) => handleExportReport(msg.reportMarkdown!, cmd.fmt, cmd.template_id)">
                   <el-button size="small" text :icon="Download">
                     导出报告
                   </el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
-                      <el-dropdown-item command="docx">Word (.docx)</el-dropdown-item>
-                      <el-dropdown-item command="pdf">PDF (.pdf)</el-dropdown-item>
-                      <el-dropdown-item command="pptx">PowerPoint (.pptx)</el-dropdown-item>
+                      <el-dropdown-item :command="{fmt: 'md'}">Markdown (.md)</el-dropdown-item>
+                      <el-dropdown-item :command="{fmt: 'docx'}">Word (.docx)</el-dropdown-item>
+                      <el-dropdown-item :command="{fmt: 'pdf'}">PDF (.pdf)</el-dropdown-item>
+                      <el-sub-menu v-if="pptTemplates.length > 0" teleported>
+                        <template #title>PowerPoint (.pptx)</template>
+                        <el-dropdown-item
+                          v-for="t in pptTemplates"
+                          :key="t.id"
+                          :command="{fmt: 'pptx', template_id: t.id}"
+                        >
+                          {{ t.name }}
+                          <span style="color:#909399; font-size:11px; margin-left:4px;">({{ t.layouts_count }}版式)</span>
+                        </el-dropdown-item>
+                      </el-sub-menu>
+                      <el-dropdown-item v-else :command="{fmt: 'pptx'}">PowerPoint (.pptx)</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -794,7 +1024,56 @@ const getStatusBadge = (status: string) => {
         </div>
       </div>
 
-      <div class="chat-input-bar">
+      <div
+        class="chat-input-bar"
+        :class="{ 'drag-over': isDragOver }"
+        @dragover="onDragOver"
+        @dragleave="onDragLeave"
+        @drop="onDrop"
+      >
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          :accept="ACCEPTED_EXTENSIONS"
+          style="display: none"
+          @change="onFileInputChange"
+        />
+
+        <div v-if="pendingAttachments.length > 0" class="pending-attachments">
+          <div
+            v-for="att in pendingAttachments"
+            :key="att.key"
+            class="attachment-chip"
+            :class="`status-${att.status}`"
+          >
+            <el-icon class="chip-icon"><Document /></el-icon>
+            <div class="chip-body">
+              <div class="chip-line">
+                <span class="chip-name">{{ att.file.name }}</span>
+                <span class="chip-size">{{ formatFileSize(att.file.size) }}</span>
+              </div>
+              <div v-if="att.status === 'uploading'" class="chip-progress">
+                <div class="chip-progress-bar">
+                  <div class="chip-progress-fill" :style="{ width: att.progress + '%' }"></div>
+                </div>
+                <span class="chip-progress-text">{{ att.progress }}%</span>
+              </div>
+              <div v-else-if="att.status === 'done'" class="chip-state done">已就绪</div>
+              <div v-else-if="att.status === 'error'" class="chip-state error" :title="att.error">上传失败</div>
+              <div v-else class="chip-state">待发送</div>
+            </div>
+            <el-button
+              text
+              size="small"
+              :icon="Close"
+              aria-label="移除附件"
+              class="chip-remove"
+              @click="removeAttachment(att.key)"
+            />
+          </div>
+        </div>
+
         <el-input
           v-model="inputTopic"
           :placeholder="inputPlaceholder"
@@ -809,35 +1088,39 @@ const getStatusBadge = (status: string) => {
           </template>
         </el-input>
         <el-button
-          v-if="loading"
-          type="danger"
+          circle
           size="large"
-          :icon="Close"
+          :icon="Paperclip"
+          class="icon-btn"
+          :disabled="loading"
+          title="添加附件"
+          @click="triggerFileInput"
+        />
+        <el-button
+          v-if="loading"
+          circle
+          type="warning"
+          size="large"
+          :icon="VideoPause"
+          class="icon-btn pause-btn"
+          title="暂停生成"
           @click="handleStop"
-          class="stop-btn"
-        >
-          停止
-        </el-button>
+        />
         <el-button
           v-else
+          circle
           type="primary"
           size="large"
           :icon="Promotion"
+          class="icon-btn send-btn"
           :disabled="!inputTopic.trim()"
+          title="发送"
           @click="sendMessage"
-          class="send-btn"
-        >
-          {{ buttonText }}
-        </el-button>
+        />
       </div>
     </main>
-
-    <!-- Phase 2: 阶段确认弹窗 -->
-    <StageConfirmDialog
-      @confirmed="handleConfirmDialogConfirmed"
-      @cancelled="handleConfirmDialogCancelled"
-    />
   </div>
+
   <div v-else class="auth-placeholder">
     <div class="placeholder-inner">
       <div class="placeholder-icon">U</div>
@@ -846,6 +1129,14 @@ const getStatusBadge = (status: string) => {
       <p class="placeholder-brand">{{ t('brand.name') }} · {{ t('brand.company') }}</p>
     </div>
   </div>
+
+  <!-- 阶段详情弹窗 -->
+  <StageDetailDialog
+    v-model:visible="detailDialogVisible"
+    :stageName="detailStageName"
+    :stageKey="detailStageKey"
+    :stageDetail="detailStageData"
+  />
 </template>
 
 <style scoped>
@@ -949,33 +1240,6 @@ const getStatusBadge = (status: string) => {
   align-items: center;
   gap: 8px;
   font-size: 11px;
-}
-
-.status-badge {
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.status-running {
-  background: var(--scdc-warning-soft);
-  color: var(--scdc-warning);
-}
-
-.status-completed {
-  background: var(--scdc-success-soft);
-  color: var(--scdc-success);
-}
-
-.status-failed {
-  background: var(--scdc-danger-soft);
-  color: var(--scdc-danger);
-}
-
-.status-idle {
-  background: var(--scdc-bg-elevated);
-  color: var(--scdc-ink-muted);
 }
 
 .history-item-time {
@@ -1141,56 +1405,81 @@ const getStatusBadge = (status: string) => {
 /* ===== Message rows ===== */
 .message-row {
   display: flex;
-  gap: 14px;
-  padding: 0 24px;
-  max-width: 850px;
+  gap: 12px;
+  padding: 16px 24px;
+  max-width: 900px;
   width: 100%;
   margin: 0 auto;
 }
 
 .user-row {
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 
 .message-avatar {
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
   flex-shrink: 0;
 }
 
+.message-avatar svg {
+  width: 18px;
+  height: 18px;
+}
+
 .user-avatar {
-  background: var(--scdc-accent-soft);
+  background: #4A90D9;
 }
 
 .assistant-avatar {
-  background: var(--scdc-success-soft);
+  background: var(--scdc-accent);
 }
 
-.message-bubble {
-  padding: 14px 20px;
+.message-sender {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.sender-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--scdc-ink-strong);
+}
+
+.sender-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--scdc-bg-elevated);
+  color: var(--scdc-ink-muted);
+  font-weight: 500;
+}
+
+.terminated-hint {
+  font-size: 13px;
+  color: var(--scdc-ink-soft);
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+.message-content {
   font-size: 14px;
   line-height: 1.7;
-  max-width: 80%;
-}
-
-.user-bubble {
-  background: var(--scdc-accent);
-  color: white;
-  border-radius: 18px 18px 4px 18px;
-  box-shadow: 0 2px 6px rgba(180, 83, 9, 0.15);
-}
-
-.assistant-bubble {
-  background: var(--scdc-bg-surface);
   color: var(--scdc-ink);
-  border-radius: 18px 18px 18px 4px;
-  border: 1px solid var(--scdc-bg-sunken);
-  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.04);
+}
+
+.user-content {
+  text-align: left;
+}
+
+.assistant-content {
+  text-align: left;
 }
 
 .message-body {
@@ -1458,6 +1747,7 @@ const getStatusBadge = (status: string) => {
 /* ===== Input bar ===== */
 .chat-input-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 16px 20px;
   border-top: 1px solid var(--scdc-bg-sunken);
@@ -1631,5 +1921,247 @@ const getStatusBadge = (status: string) => {
   .chat-input-bar {
     padding: 12px 12px;
   }
+}
+
+/* ===== Attachment upload UI ===== */
+.pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px 0;
+  width: 100%;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  background: var(--el-color-primary-light-9);
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 10px;
+  font-size: 12px;
+  min-width: 220px;
+  max-width: 280px;
+}
+
+.attachment-chip.status-error {
+  background: var(--el-color-danger-light-9);
+  border-color: var(--el-color-danger-light-5);
+}
+
+.attachment-chip.status-done {
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5);
+}
+
+.chip-icon {
+  color: var(--el-color-primary);
+  flex-shrink: 0;
+  font-size: 18px;
+}
+
+.attachment-chip.status-error .chip-icon {
+  color: var(--el-color-danger);
+}
+
+.attachment-chip.status-done .chip-icon {
+  color: var(--el-color-success);
+}
+
+.chip-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chip-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+}
+
+.chip-size {
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.chip-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip-progress-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(64, 158, 255, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.chip-progress-fill {
+  height: 100%;
+  background: var(--el-color-primary);
+  border-radius: 2px;
+  transition: width 0.2s ease;
+  background-image: linear-gradient(
+    90deg,
+    var(--el-color-primary) 0%,
+    var(--el-color-primary-light-3) 50%,
+    var(--el-color-primary) 100%
+  );
+  background-size: 200% 100%;
+  animation: chip-progress-shimmer 1.4s linear infinite;
+}
+
+@keyframes chip-progress-shimmer {
+  0%   { background-position: 0% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.chip-progress-text {
+  font-size: 11px;
+  color: var(--el-color-primary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 30px;
+  text-align: right;
+}
+
+.chip-state {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+.chip-state.done {
+  color: var(--el-color-success);
+}
+
+.chip-state.error {
+  color: var(--el-color-danger);
+}
+
+.chip-remove {
+  padding: 0 2px !important;
+  flex-shrink: 0;
+}
+
+.chat-input-bar.drag-over {
+  background: var(--el-color-primary-light-9);
+  border-radius: 8px;
+}
+
+/* ===== Round icon buttons (chat input bar) ===== */
+.icon-btn {
+  width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  padding: 0 !important;
+  font-size: 20px;
+  margin-left: 4px;
+  flex-shrink: 0;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.25);
+}
+
+.icon-btn.pause-btn {
+  animation: pause-btn-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pause-btn-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(230, 162, 60, 0.5); }
+  50%      { box-shadow: 0 0 0 6px rgba(230, 162, 60, 0); }
+}
+
+/* ===== User message attachments (rendered inside chat history) ===== */
+.user-message-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.user-attachments {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  align-self: flex-start;
+}
+
+.user-attachment-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--scdc-bg-sunken);
+  border-radius: 12px;
+  box-shadow: var(--scdc-shadow-soft);
+  min-width: 200px;
+  max-width: 100%;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.user-attachment-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+
+.user-attachment-card .att-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scdc-accent-soft, rgba(64, 158, 255, 0.12));
+  color: var(--scdc-accent, #409eff);
+  border-radius: 8px;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.user-attachment-card .att-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.user-attachment-card .att-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--scdc-ink, #303133);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-attachment-card .att-sub {
+  font-size: 11px;
+  color: var(--scdc-ink-soft, #909399);
+  letter-spacing: 0.02em;
 }
 </style>

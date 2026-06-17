@@ -4,7 +4,9 @@
 提供对话式市场洞察入口：用户提交分析主题 → 全流程自动执行 → 返回结构化报告。
 """
 
-from typing import Any, List, Literal, Optional
+import logging
+from dataclasses import replace
+from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -14,6 +16,7 @@ from app.api.responses import success_response, ResponseModel
 from app.services.workflow import workflow_service, STAGE_SEQUENCE
 from app.core.runtime_config import rumtime_config
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -29,12 +32,16 @@ def _resolve_use_rag(req_use_rag: bool) -> bool:
 
 class WorkflowStartRequest(BaseModel):
     topic: str = Field(..., max_length=500, description="分析主题或问题，例如：2025年AI芯片市场趋势")
-    max_items: int = Field(default=5, ge=1, le=20, description="搜索采集的最大条目数")
+    max_items: int = Field(default=10, ge=1, le=50, description="搜索采集的最大条目数")
     dimensions: List[str] = Field(
-        default_factory=lambda: ["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"],
-        description="自定义分析维度",
+        default_factory=list,
+        description="自定义分析维度；空列表时由 DimensionGenerator 按主题动态生成 4-6 个",
     )
     use_rag: bool = Field(default=False, description="直答时是否启用历史报告 RAG 检索")
+    attachment_ids: List[str] = Field(
+        default_factory=list,
+        description="用户上传的附件 ID 列表，会作为采集阶段的一手资料",
+    )
 
 
 class FollowUpRequest(BaseModel):
@@ -44,42 +51,15 @@ class FollowUpRequest(BaseModel):
         description="之前的对话历史，每个元素包含 role 和 content",
     )
     use_rag: bool = Field(default=False, description="直答时是否启用历史报告 RAG 检索")
-
-
-class ReentryRequest(BaseModel):
-    target_stage: str = Field(..., description="目标阶段: collecting, analyzing, reporting")
-    user_feedback: str = Field(default="", description="用户补充反馈/约束")
-
-
-# --- Phase 2 Human-in-the-Loop (Spec 1) ---
-class ConfirmStageRequest(BaseModel):
-    """阶段确认请求
-
-    decision=accept → 进入下一阶段
-    decision=reject → 重跑当前阶段
-        user_edits  非空 → 与原 topic 合并后重跑
-        user_feedback 非空 → AI 解析后调整策略重跑
-        两者都为空 → 完全重跑
-    decision=skip → 不看预览直接接受，进入下一阶段（不计入重试）
-    """
-    decision: Literal["accept", "reject", "skip"]
-    user_edits: Optional[dict] = Field(
-        default=None,
-        description="用户编辑（如 extra_urls/extra_keywords）",
+    attachment_ids: List[str] = Field(
+        default_factory=list,
+        description="用户上传的附件 ID 列表，会作为采集阶段的一手资料",
     )
-    user_feedback: Optional[str] = Field(
+    # 历史追问聚合 spec: 追问时指向父工作流的 workflow_id,用于在 DB 中建立父子关联
+    parent_workflow_id: Optional[str] = Field(
         default=None,
-        max_length=2000,
-        description="用户文字反馈",
+        description="追问的父工作流 ID,None 表示本次请求应作为顶层对话",
     )
-
-
-class WorkflowStatusResponse(BaseModel):
-    run_id: str
-    stage: str
-    stage_state: str
-    stage_output: Optional[dict] = None
-    stage_history: Optional[list] = None
 
 
 @router.post("/start")
@@ -93,16 +73,21 @@ async def start_workflow(
         use_rag=effective_use_rag,
     )
 
+    # 修复:有附件(尤其是图片)时强制走 direct 路径,保证多模态 LLM 能看到附件
+    if req.attachment_ids and decision.action == "orchestrate":
+        logger.info(
+            "Overriding 'orchestrate' to 'direct' in /start because %d attachment(s) present",
+            len(req.attachment_ids),
+        )
+        decision = replace(decision, action="direct", intent_type="direct_with_attachment")
+
     if decision.action == "direct":
         state = await workflow_service.create_workflow(
             topic=req.topic,
             max_items=0,
             dimensions=[],
             use_rag=effective_use_rag,
-            # Phase 7 修复:direct 也设置 initial_stage="collecting",
-            # 这样 _create_stage_stream_response 的 current_stage 校验能通过。
-            # 直答流在 _create_stage_stream_response 内通过 is_direct_response 标记
-            # 走 run_direct_response_stream(),而不是 run_stage_only_stream()
+            attachment_ids=req.attachment_ids,
             initial_stage="collecting",
         )
         state.is_direct_response = True
@@ -120,6 +105,7 @@ async def start_workflow(
             max_items=req.max_items,
             dimensions=req.dimensions,
             use_rag=effective_use_rag,
+            attachment_ids=req.attachment_ids,
             initial_stage=target_stage,
         )
         return success_response(data={
@@ -136,7 +122,8 @@ async def start_workflow(
         max_items=req.max_items,
         dimensions=req.dimensions,
         use_rag=effective_use_rag,
-        initial_stage="collecting",  # 起始阶段:前端 stream-collecting 端点可立即启动
+        attachment_ids=req.attachment_ids,
+        initial_stage="collecting",
     )
     return success_response(data={
         "workflow_id": state.workflow_id,
@@ -157,14 +144,28 @@ async def follow_up_workflow(
         has_existing_report=True,
     )
 
+    # 修复:追问时若携带了附件(尤其是图片),无论意图分类结果如何都走 direct 路径,
+    # 否则 orchestrate 路径下附件会被 CollectorAgent 当作"用户资料"对待,
+    # LLM 接收不到多模态图片,只能回答"我无法查看图片"。
+    has_attachments = bool(req.attachment_ids)
+    if has_attachments and decision.action == "orchestrate":
+        logger.info(
+            "Overriding 'orchestrate' to 'direct' because %d attachment(s) present "
+            "and multimodal LLM call only works in direct path",
+            len(req.attachment_ids),
+        )
+        decision = replace(decision, action="direct", intent_type="direct_with_attachment")
+
     if decision.action == "orchestrate":
         state = await workflow_service.create_workflow(
             topic=req.message,
-            max_items=5,
-            dimensions=["宏观经济环境", "行业形势与趋势", "细分板块分析", "竞争格局与对手"],
+            max_items=10,  # 追问需要补充新数据,比首次(20)略少但远多于 5
+            dimensions=req.dimensions,  # 空 list → Orchestrator 走 DimensionGenerator 动态生成
             conversation_history=req.conversation_history,
             use_rag=effective_use_rag,
+            attachment_ids=req.attachment_ids,
             initial_stage="collecting",
+            parent_workflow_id=req.parent_workflow_id,
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
@@ -176,11 +177,13 @@ async def follow_up_workflow(
         target_stage = decision.target_stage if decision.target_stage in STAGE_SEQUENCE else "collecting"
         state = await workflow_service.create_workflow(
             topic=req.message,
-            max_items=5,
+            max_items=10,  # reentry 同样需要足够数据支撑分析
             dimensions=[],
             conversation_history=req.conversation_history,
             use_rag=effective_use_rag,
+            attachment_ids=req.attachment_ids,
             initial_stage=target_stage,
+            parent_workflow_id=req.parent_workflow_id,
         )
         return success_response(data={
             "workflow_id": state.workflow_id,
@@ -197,8 +200,9 @@ async def follow_up_workflow(
         dimensions=[],
         conversation_history=req.conversation_history,
         use_rag=effective_use_rag,
-        # Phase 7 修复:同 /start direct 分支,设置 initial_stage="collecting" 让校验通过
+        attachment_ids=req.attachment_ids,
         initial_stage="collecting",
+        parent_workflow_id=req.parent_workflow_id,
     )
     state.is_direct_response = True
     return success_response(data={
@@ -219,7 +223,7 @@ async def stream_workflow(
             yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
         return StreamingResponse(err_gen(), media_type="text/event-stream")
     return StreamingResponse(
-        workflow_service.run_workflow_stream(state, use_rag=state.use_rag),
+        workflow_service.run_pipeline_stream(state, use_rag=state.use_rag),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -227,115 +231,6 @@ async def stream_workflow(
             "X-Accel-Buffering": "no",
         },
     )
-
-
-# --- Phase 2: 数据采集阶段（collecting）单独 SSE 流 ---
-def _create_stage_stream_response(state, stage: str) -> StreamingResponse:
-    """Spec 2: 给定 workflow state 和目标 stage，返回 SSE StreamingResponse。
-
-    流程：
-    1. 校验 workflow 存在
-    2. 校验 state.stage_state == 'running' && state.current_stage == stage
-    3. 委托 workflow_service.run_stage_only_stream(state, stage)
-
-    Phase 7 修复:如果 state 是直答工作流（is_direct_response=True）,
-        即使 current_stage 校验通过,也走 run_direct_response_stream 而非
-        run_stage_only_stream。前端的 stream-{stage} 端点对两类都开放,
-        让前端不必区分 SSE URL。
-    """
-    if state.stage_state != "running":
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow is not in 'running' state (current: {state.stage_state})\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-
-    # 直答工作流:走 run_direct_response_stream,产生 direct_response / direct_response_done 事件
-    # 前端在 workflow.ts 已有对应 handler
-    if getattr(state, "is_direct_response", False):
-        return StreamingResponse(
-            workflow_service.run_direct_response_stream(
-                state.topic,
-                conversation_history=state.conversation_history,
-                use_rag=state.use_rag,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    if state.current_stage != stage:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow current_stage is '{state.current_stage}', requested '{stage}'\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return StreamingResponse(
-        workflow_service.run_stage_only_stream(state, stage),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@router.get("/{workflow_id}/stream-collecting")
-async def stream_collecting(
-    workflow_id: str,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
-    """Spec 1: 仅运行 collecting 阶段的 SSE 流。
-    阶段结束后 stage_state='awaiting_confirmation'，流正常结束。
-    """
-    state = await workflow_service.get_workflow(workflow_id)
-    if not state:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return _create_stage_stream_response(state, "collecting")
-
-
-@router.get("/{workflow_id}/stream-cleaning")
-async def stream_cleaning(
-    workflow_id: str,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
-    """Spec 2: 仅运行 cleaning 阶段的 SSE 流。"""
-    state = await workflow_service.get_workflow(workflow_id)
-    if not state:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return _create_stage_stream_response(state, "cleaning")
-
-
-@router.get("/{workflow_id}/stream-analyzing")
-async def stream_analyzing(
-    workflow_id: str,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
-    """Spec 2: 仅运行 analyzing 阶段的 SSE 流。"""
-    state = await workflow_service.get_workflow(workflow_id)
-    if not state:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return _create_stage_stream_response(state, "analyzing")
-
-
-@router.get("/{workflow_id}/stream-reporting")
-async def stream_reporting(
-    workflow_id: str,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
-    """Spec 2: 仅运行 reporting 阶段的 SSE 流。"""
-    state = await workflow_service.get_workflow(workflow_id)
-    if not state:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-    return _create_stage_stream_response(state, "reporting")
 
 
 @router.get("/{workflow_id}", response_model=ResponseModel)
@@ -354,120 +249,32 @@ async def get_workflow_status(
         "stages": state.stages,
         "result": state.result,
         "error": state.error,
-        # Phase 2: 暴露状态机字段
-        "stage_state": state.stage_state,
-        "stage_output": state.stage_output,
-        "stage_history": state.stage_history,
     })
 
 
-class WorkflowStatusResponse(BaseModel):
-    """Spec 2: 轻量化的 workflow 状态查询，用于页面刷新后恢复确认弹窗。
-
-    与 /{workflow_id} 不同：只返回弹窗恢复所需的关键字段，不返 history 详情（节省带宽）。
-    """
-    workflow_id: str
-    stage: str
-    stage_state: str
-    stage_output: Optional[dict] = None
-    stage_history_length: int = 0
-    sse_url: Optional[str] = None  # 建议的下一阶段 SSE URL（仅 running 状态）
+class UpdateStatusRequest(BaseModel):
+    status: str = Field(..., description="Workflow status: idle, running, completed, failed")
 
 
-@router.get("/{workflow_id}/status", response_model=ResponseModel)
-async def get_workflow_status_lightweight(
+@router.patch("/{workflow_id}/status", response_model=ResponseModel)
+async def update_workflow_status(
     workflow_id: str,
+    req: UpdateStatusRequest,
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """Spec 2: 轻量化的 workflow 状态查询端点。
+    """更新 workflow 状态（用于前端 direct response 完成状态持久化）。"""
+    valid_statuses = {"idle", "running", "completed", "failed"}
+    if req.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {req.status}. Must be one of {valid_statuses}")
 
-    用途: 用户刷新页面后，前端用此端点查 stage_output + stage_state，决定是否恢复确认弹窗。
-    """
     state = await workflow_service.get_workflow(workflow_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-    # 建议的下一阶段 SSE URL
-    sse_url: Optional[str] = None
-    if state.stage_state == "running" and state.current_stage in ("collecting", "cleaning", "analyzing", "reporting"):
-        sse_url = f"/api/v1/workflow/{workflow_id}/stream-{state.current_stage}"
+    state.status = req.status
+    await workflow_service._persist_stage_update(state)
 
-    return success_response(data={
-        "workflow_id": state.workflow_id,
-        "stage": state.current_stage,
-        "stage_state": state.stage_state,
-        "stage_output": state.stage_output,
-        "stage_history_length": len(state.stage_history),
-        "sse_url": sse_url,
-    })
-
-
-@router.post("/{workflow_id}/confirm")
-async def confirm_stage(
-    workflow_id: str,
-    req: ConfirmStageRequest,
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """Spec 1: 用户确认/拒绝当前阶段输出。
-
-    accept → 进入下一阶段（next_stage 非空）
-    reject → 重跑当前阶段（next_stage == current_stage）
-    """
-    state = await workflow_service.get_workflow(workflow_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
-
-    result = await workflow_service.confirm_stage(
-        state,
-        decision=req.decision,
-        user_edits=req.user_edits,
-        user_feedback=req.user_feedback,
-    )
-
-    # 构造新 SSE 流 URL（Spec 2: 4 阶段都要路由）
-    next_stage = result.get("next_stage")
-    if next_stage and next_stage in ("collecting", "cleaning", "analyzing", "reporting"):
-        sse_url = f"/api/v1/workflow/{workflow_id}/stream-{next_stage}"
-    else:
-        sse_url = None  # completed
-
-    return success_response(data={
-        "workflow_id": state.workflow_id,
-        "stage": state.current_stage,
-        "stage_state": state.stage_state,
-        "next_stage": next_stage,
-        "sse_url": sse_url,
-        "stage_history_length": len(state.stage_history),
-    })
-
-
-@router.post("/{workflow_id}/reentry")
-async def reentry_workflow(
-    workflow_id: str,
-    req: ReentryRequest,
-    current_user: User = Depends(get_current_active_user_sse),
-) -> StreamingResponse:
-    original_state = await workflow_service.get_workflow(workflow_id)
-    if not original_state:
-        async def err_gen():
-            yield f"event: error\ndata: {{\"error\": \"Workflow not found: {workflow_id}\"}}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
-
-    topic = original_state.topic
-    return StreamingResponse(
-        workflow_service.run_reentry_stream(
-            original_workflow_id=workflow_id,
-            target_stage=req.target_stage,
-            user_feedback=req.user_feedback,
-            topic=topic,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return success_response(data={"workflow_id": workflow_id, "status": req.status})
 
 
 @router.get("/history/list", response_model=ResponseModel)
@@ -475,3 +282,27 @@ async def get_workflow_history(
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
     return success_response(data=await workflow_service.get_history())
+
+
+@router.delete("/{workflow_id}", response_model=ResponseModel)
+async def delete_workflow(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """删除指定工作流记录(内存 + DB)。"""
+    success = await workflow_service.delete_workflow(workflow_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    return success_response(data={"workflow_id": workflow_id})
+
+
+@router.post("/{workflow_id}/stop", response_model=ResponseModel)
+async def stop_workflow(
+    workflow_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """停止正在运行的工作流（用户点击停止按钮）。"""
+    success = await workflow_service.stop_workflow(workflow_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    return success_response(data={"workflow_id": workflow_id})
