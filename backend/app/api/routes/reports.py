@@ -143,6 +143,8 @@ async def create_report_from_workflow(
         title=req.title,
         content_markdown=req.content_markdown,
         summary=req.summary,
+        chart_images=req.chart_images,
+        dimension_illustrations=req.dimension_illustrations,
     )
     return success_response(data=ReportOut.model_validate(obj).model_dump())
 

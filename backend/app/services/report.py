@@ -96,6 +96,11 @@ class ReportService:
         session.add(r)
         await session.commit()
         await session.refresh(r)
+        # 调试日志:验证图片数据是否成功写入 DB
+        logger.info(
+            "[DEBUG][report] create_report id=%s task_id=%s images_count=%d",
+            r.id, r.task_id, len(r.images or []),
+        )
         # 注意：lazy 模式下不在此处触发 Milvus 写入
         return r
 
@@ -202,6 +207,16 @@ class ReportService:
                     "section": ill.get("section", ""),
                     "position": ill.get("position", 0),
                 })
+
+        # 调试日志:记录合并后图片数量
+        logger.info(
+            "[DEBUG][report] create_from_workflow task_id=%s "
+            "chart_images=%d, dimension_illustrations=%d, merged_all_images=%d",
+            task_id,
+            len(chart_images or []),
+            len(dimension_illustrations or []),
+            len(all_images),
+        )
 
         report_in = ReportCreate(
             task_id=task_id,
@@ -832,6 +847,11 @@ class ReportService:
             raise ValueError("Report not found")
 
         chart_images = r.images if isinstance(r.images, list) else []
+        # 调试日志:验证从 DB 读出的图片数量
+        logger.info(
+            "[DEBUG][report] export_report id=%s fmt=%s images_from_db=%d",
+            report_id, fmt, len(chart_images),
+        )
 
         fmt = fmt.lower()
         if fmt == "docx":

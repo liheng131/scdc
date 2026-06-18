@@ -484,7 +484,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                     if numeric_content:
                         mpl_result = self.image_service.generate_matplotlib_chart(
                             section_title=dim,
-                            section_content=numeric_content,
+                            content=numeric_content,  # 修复: 关键字参数应为 content
                             chart_type="bar"
                         )
                         if mpl_result:
@@ -498,7 +498,12 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                             successful_dimensions.add(dim)
                             logger.info(f"Matplotlib chart generated for dimension '{dim}'")
                 except Exception as e:
-                    logger.warning(f"Matplotlib chart generation failed for dimension '{dim}': {e}")
+                    # 修复: 打印异常类型和堆栈,避免静默失败
+                    logger.warning(
+                        f"Matplotlib chart generation failed for dimension '{dim}': "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True
+                    )
 
             # 限制每个维度最多 2 张图
             if position_counter > len(target_dimensions) * 2:

@@ -713,11 +713,22 @@ const handleExportReport = async (markdown: string, fmt: string, template_id?: s
 
   if (!reportId) {
     try {
+      // 从对应 assistant 消息的 stageDetails.reporting.detail 中提取图片数据
+      const assistantMsg = messages.value
+        .slice()
+        .reverse()
+        .find(m => m.role === 'assistant' && m.reportMarkdown === markdown);
+      const reportingDetail = assistantMsg?.stageDetails?.reporting?.detail;
+      const chartImages = reportingDetail?.chart_images || [];
+      const dimensionIllustrations = reportingDetail?.dimension_illustrations || [];
+
       const res = await reportsApi.createFromWorkflow({
         task_id: wfId,
         title: workflowStore.activeConversation?.topic || 'Untitled',
         content_markdown: markdown,
         summary: markdown?.substring(0, 200),
+        chart_images: chartImages,
+        dimension_illustrations: dimensionIllustrations,
       });
       reportId = res.data.id;
       reportIdCache.value[wfId] = reportId;

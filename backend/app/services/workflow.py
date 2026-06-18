@@ -508,14 +508,21 @@ class WorkflowService:
                         sa_select(ReportModel).where(ReportModel.task_id == state.workflow_id)
                     )
                     if not existing.scalar_one_or_none():
+                        chart_images = report_data.get("chart_images", [])
+                        dimension_illustrations = report_data.get("dimension_illustrations", [])
+                        logger.info(
+                            "[DEBUG][workflow] run_workflow_stream saving report task=%s "
+                            "chart_images=%d, dimension_illustrations=%d",
+                            state.workflow_id, len(chart_images), len(dimension_illustrations),
+                        )
                         report = await report_svc.create_from_workflow(
                             sess,
                             task_id=state.workflow_id,
                             title=state.topic,
                             content_markdown=report_data.get("report_markdown", ""),
                             summary=report_data.get("report_markdown", "")[:200] if report_data.get("report_markdown") else None,
-                            chart_images=report_data.get("chart_images", []),
-                            dimension_illustrations=report_data.get("dimension_illustrations", []),
+                            chart_images=chart_images,
+                            dimension_illustrations=dimension_illustrations,
                         )
                         report_id = report.id
                         logger.info("Auto-saved report for workflow %s, report_id=%s", state.workflow_id, report_id)
@@ -685,6 +692,8 @@ class WorkflowService:
                     reporting_raw = raw_output
                     report_text = reporting_raw.get("report", "")
                     chart_configs = reporting_raw.get("chart_configs", [])
+                    chart_images = reporting_raw.get("chart_images", [])
+                    dimension_illustrations = reporting_raw.get("dimension_illustrations", [])
                     yield self._sse("stage_complete", {
                         "stage": stage,
                         "label": STAGE_LABELS[stage],
@@ -696,6 +705,8 @@ class WorkflowService:
                         "detail": {
                             "report_markdown": report_text,
                             "chart_count": len(chart_configs),
+                            "chart_images": chart_images,
+                            "dimension_illustrations": dimension_illustrations,
                         },
                     })
                 else:
@@ -742,12 +753,19 @@ class WorkflowService:
                     sa_select(ReportModel).where(ReportModel.task_id == state.workflow_id)
                 )
                 if not existing.scalar_one_or_none():
+                    chart_images = state.result.get("chart_images", [])
+                    dimension_illustrations = state.result.get("dimension_illustrations", [])
+                    logger.info(
+                        "[DEBUG][workflow] run_pipeline_stream saving report task=%s "
+                        "chart_images=%d, dimension_illustrations=%d",
+                        state.workflow_id, len(chart_images), len(dimension_illustrations),
+                    )
                     report = await report_svc.create_from_workflow(
                         sess, task_id=state.workflow_id, title=state.topic,
                         content_markdown=state.result.get("report_markdown", ""),
                         summary=(state.result.get("report_markdown", "")[:200] if state.result.get("report_markdown") else None),
-                        chart_images=state.result.get("chart_images", []),
-                        dimension_illustrations=state.result.get("dimension_illustrations", []),
+                        chart_images=chart_images,
+                        dimension_illustrations=dimension_illustrations,
                     )
                     report_id = report.id
         except Exception as e:
@@ -955,6 +973,31 @@ class WorkflowService:
             raise RuntimeError(f"Reporter failed: {rep_out.error}")
 
         sections_dict = [s.model_dump() for s in rep_out.sections]
+        # 调试日志:记录图片数量便于排查持久化问题
+        chart_images_count = len(rep_out.chart_images or [])
+        dim_illus_count = len(rep_out.dimension_illustrations or [])
+        logger.info(
+            "[DEBUG][workflow] _run_reporting_stage task=%s "
+            "chart_images=%d (total_b64_size=%d), "
+            "dimension_illustrations=%d (total_b64_size=%d)",
+            state.workflow_id,
+            chart_images_count,
+            sum(len(ci.get("base64", "")) for ci in (rep_out.chart_images or [])),
+            dim_illus_count,
+            sum(len(ci.get("base64", "")) for ci in (rep_out.dimension_illustrations or [])),
+        )
+        # 校验 base64 字符串可被 JSON 序列化(避免 Pydantic 报错或数据库写入失败)
+        try:
+            json.dumps({
+                "chart_images": rep_out.chart_images,
+                "dimension_illustrations": rep_out.dimension_illustrations,
+            }, default=str)
+        except TypeError as je:
+            logger.error(
+                "[DEBUG][workflow] ReporterOutput images NOT JSON serializable: %s", je
+            )
+            raise
+
         stage_output = {
             "stage": "reporting",
             "report": rep_out.markdown_report,
