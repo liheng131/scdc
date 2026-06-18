@@ -86,14 +86,16 @@ class AnySearchService:
         """
         构造 AnySearch 请求体。
 
-        为什么暂不传 time_range / categories：
-        - 用户提供的 curl 示例未包含这些字段
-        - 先保守只传 query + max_results，避免未知字段被 API 拒绝
-        - 后续根据 API 实际支持的字段再扩展
+        为什么只请求 web 类型而不带 doc：
+        - 之前的 payload 会让 AnySearch 顺手把 PDF / docx 等"文档型"结果也带回来
+        - 这些 doc 链接的 Content-Type 不是 text/html,crawler 当 HTML 抓后用 utf-8 解码二进制
+          会得到 `%PDF-1.3 % 10 obj <> endobj ...` 这种乱码进入 LLM 上下文
+        - 显式限定 content_types=["web"] 可在源头避免
         """
         return {
             "query": request.query,
             "max_results": self.default_max_results,
+            "content_types": ["web"],
         }
 
     async def _do_request(self, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
@@ -267,6 +269,84 @@ class AnySearchService:
             success=True,
             results=items,
             total_results=len(items),
+        )
+
+    async def search_multi_categories(
+        self,
+        query: str,
+        categories: Optional[List[str]] = None,
+        max_per_category: Optional[int] = None,
+        timeout: Optional[int] = None,
+    ) -> SearchResponse:
+        """
+        按多个类别并发搜索，合并去重后返回。
+
+        为什么用并发搜索：
+        - 不同类别（通用/新闻/科技）覆盖不同来源，丰富数据多样性
+        - asyncio.gather 并发执行，总耗时不增加（取最慢的那次）
+
+        categories: 搜索类别列表，如 ["", "news", "tech"]
+          - 空字符串表示通用搜索（不指定 domain）
+          - 其他值对应 AnySearch 的 domain 参数
+        max_per_category: 每个类别最大返回数
+        timeout: 单次搜索超时
+        """
+        if not self.api_key:
+            return SearchResponse(
+                query=query, success=False, error="ANYSEARCH_API_KEY 未配置", results=[], total_results=0,
+            )
+
+        categories = categories or [""]  # 默认仅通用搜索
+        max_per_category = max_per_category or self.default_max_results
+        timeout = min(timeout or self.default_timeout, 30)
+
+        # 并发执行多类别搜索
+        tasks = []
+        for cat in categories:
+            payload = {
+                "query": query,
+                "max_results": max_per_category,
+                "content_types": ["web"],
+            }
+            if cat:  # 仅当指定类别时添加 domain 参数
+                payload["domain"] = cat
+            tasks.append(self._search_with_retry(payload, timeout))
+
+        results_by_category = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 合并结果并去重（按 URL 去重）
+        seen_urls: set = set()
+        merged_items: List[SearchResultItem] = []
+        for result in results_by_category:
+            if isinstance(result, Exception):
+                logger.warning("Multi-category search failed for one category: %s", result)
+                continue
+            for item in result:
+                url = item.get("url") or item.get("link") or ""
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    merged_items.append(SearchResultItem(
+                        url=url,
+                        title=item.get("title") or "",
+                        snippet=(
+                            item.get("snippet")
+                            or item.get("content")
+                            or item.get("description")
+                            or ""
+                        ),
+                        source=item.get("source") or "anysearch",
+                        score=item.get("score"),
+                        published_date=item.get("published_date") or item.get("date"),
+                    ))
+
+        record_anysearch_success()
+        logger.info(
+            "AnySearch multi-category search succeeded for query '%s' (%d categories, %d merged results)",
+            query, len(categories), len(merged_items),
+        )
+
+        return SearchResponse(
+            query=query, success=True, results=merged_items, total_results=len(merged_items),
         )
 
 

@@ -18,6 +18,9 @@ import logging
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from pathlib import Path
 from typing import List, Optional
 import httpx
 from sqlalchemy import select
@@ -29,11 +32,11 @@ from app.schemas.notification import NotificationRuleCreate, NotificationRuleUpd
 logger = logging.getLogger(__name__)
 
 class NotificationAdapter:
-    async def send(self, target: str, title: str, content: str) -> bool:
+    async def send(self, target: str, title: str, content: str, attachments: Optional[List[str]] = None) -> bool:
         raise NotImplementedError
 
 class EmailAdapter(NotificationAdapter):
-    async def send(self, target: str, title: str, content: str) -> bool:
+    async def send(self, target: str, title: str, content: str, attachments: Optional[List[str]] = None) -> bool:
         """通过 SMTP 发送邮件通知，异步委托到线程池执行"""
         if not settings.smtp_host:
             logger.warning("SMTP host not configured. Skipping email send.")
@@ -46,10 +49,48 @@ class EmailAdapter(NotificationAdapter):
             msg['Subject'] = title
             msg.attach(MIMEText(content, 'html', 'utf-8'))
 
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
-                if settings.smtp_user and settings.smtp_password:
-                    server.login(settings.smtp_user, settings.smtp_password)
-                server.send_message(msg)
+            # 处理附件
+            if attachments:
+                for file_path in attachments:
+                    path = Path(file_path)
+                    if not path.exists():
+                        logger.warning(f"Attachment file not found: {file_path}")
+                        continue
+
+                    # 根据文件扩展名推断 MIME 类型
+                    suffix = path.suffix.lower()
+                    if suffix == '.md':
+                        mime_type = 'text/plain'
+                    elif suffix == '.docx':
+                        mime_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                    elif suffix == '.pdf':
+                        mime_type = 'application/pdf'
+                    elif suffix == '.pptx':
+                        mime_type = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+                    else:
+                        mime_type = 'application/octet-stream'
+
+                    # 读取文件并添加附件
+                    with open(path, 'rb') as f:
+                        part = MIMEBase(mime_type.split('/')[0], mime_type.split('/')[1])
+                        part.set_payload(f.read())
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            'Content-Disposition',
+                            f'attachment; filename="{path.name}"'
+                        )
+                        msg.attach(part)
+
+            if settings.smtp_port == 465:
+                with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port) as server:
+                    if settings.smtp_user and settings.smtp_password:
+                        server.login(settings.smtp_user, settings.smtp_password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+                    if settings.smtp_user and settings.smtp_password:
+                        server.login(settings.smtp_user, settings.smtp_password)
+                    server.send_message(msg)
 
         try:
             await asyncio.to_thread(_send_sync)
@@ -60,7 +101,7 @@ class EmailAdapter(NotificationAdapter):
             return False
 
 class WebhookAdapter(NotificationAdapter):
-    async def send(self, target: str, title: str, content: str) -> bool:
+    async def send(self, target: str, title: str, content: str, attachments: Optional[List[str]] = None) -> bool:
         """向 Webhook URL 发送 Markdown 格式消息（兼容钉钉机器人格式）"""
         payload = {
             "msgtype": "markdown",
@@ -130,7 +171,7 @@ class NotificationService:
         await session.commit()
         return True
 
-    async def notify(self, session: AsyncSession, trigger: str, title: str, content: str) -> dict:
+    async def notify(self, session: AsyncSession, trigger: str, title: str, content: str, attachments: Optional[List[str]] = None) -> dict:
         """
         根据触发事件类型查找启用的通知规则，调用对应适配器发送通知
 
@@ -150,7 +191,7 @@ class NotificationService:
 
             success = False
             for attempt in range(1, 4):
-                if await adapter.send(r.target, title, content):
+                if await adapter.send(r.target, title, content, attachments):
                     success = True
                     break
                 logger.warning(f"Notification send failed for rule {r.id}, retrying attempt {attempt+1}")
@@ -159,3 +200,16 @@ class NotificationService:
             results[r.id] = success
 
         return results
+
+    async def send_direct(self, channel: str, target: str, title: str, content: str, attachments: Optional[List[str]] = None) -> bool:
+        """直接发送到指定渠道和目标，不查规则表"""
+        adapter = self.adapters.get(channel)
+        if not adapter:
+            logger.warning(f"No adapter for channel: {channel}")
+            return False
+        for attempt in range(1, 4):
+            if await adapter.send(target, title, content, attachments):
+                return True
+            logger.warning(f"Direct send failed, retrying attempt {attempt+1}")
+            await asyncio.sleep(2 ** attempt)
+        return False

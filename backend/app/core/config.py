@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"                         # LLM 提供商：ollama 或 gpustack
     anysearch_api_key: str = ""                         # AnySearch 搜索引擎 API Key
     anysearch_base_url: str = "https://api.anysearch.com"  # AnySearch API base URL
-    anysearch_default_max_results: int = 10             # AnySearch 单次请求默认返回数量
-    anysearch_timeout: int = 10                          # AnySearch 请求默认超时（秒）
+    anysearch_default_max_results: int = 20             # AnySearch 单次请求默认返回数量
+    anysearch_timeout: int = 15                          # AnySearch 请求默认超时（秒）
     milvus_url: str = "http://localhost:19530"           # Milvus 向量数据库
     opensearch_url: str = "http://localhost:9200"        # OpenSearch 全文搜索引擎
     minio_endpoint: str = "http://localhost:9000"        # MinIO 对象存储

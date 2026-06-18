@@ -172,6 +172,15 @@ async def lifespan(app: FastAPI):
             """))
     except Exception as e:
         logger.warning("Failed to initialize workflow_runs: %s", e)
+
+    # Clean up orphan running workflows from previous server restarts
+    logger.info("Cleaning up orphan workflows...")
+    try:
+        from app.services.workflow import workflow_service
+        await workflow_service.cleanup_orphan_workflows()
+    except Exception as e:
+        logger.warning("Failed to cleanup orphan workflows at startup: %s", e)
+
     logger.info("Initializing vector store...")
     try:
         vectorstore = VectorStoreService()

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { reportsApi, apiClient, type ReportInfo } from '../api'
-import { Search, Refresh, View, Delete, Download, Upload } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { notificationApi } from '../api/services/notification'
+import { Search, Refresh, View, Delete, Download, Upload, Promotion } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { marked } from 'marked'
 
 const reports = ref<ReportInfo[]>([])
@@ -24,6 +25,18 @@ const renderedMarkdown = ref('')
 const editingId = ref<number | null>(null)
 const editingTitle = ref('')
 const editInputRef = ref<any>(null)
+
+// 推送弹窗
+const pushVisible = ref(false)
+const pushReportId = ref<number | null>(null)
+const pushFormat = ref('pdf')
+const pushLoading = ref(false)
+const pushFormatOptions = [
+  { label: 'PDF 文档', value: 'pdf' },
+  { label: 'Word 文档', value: 'docx' },
+  { label: 'PPT 演示', value: 'pptx' },
+  { label: 'Markdown', value: 'md' },
+]
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -120,9 +133,12 @@ const handleDelete = async (row: ReportInfo) => {
   }
 }
 
-const handleExport = async (row: ReportInfo, fmt: string) => {
+const handleExport = async (row: ReportInfo, cmd: { fmt: string; template_id?: string } | string) => {
+  // 兼容旧的字符串入参（直接传 fmt）
+  const fmt = typeof cmd === 'string' ? cmd : cmd.fmt
+  const template_id = typeof cmd === 'string' ? undefined : cmd.template_id
   try {
-    const url = reportsApi.exportReportUrl(row.id, fmt)
+    const url = reportsApi.exportReportUrl(row.id, fmt, template_id)
     const response = await fetch(url, {
       headers: reportsApi.getExportHeaders(),
     })
@@ -139,6 +155,17 @@ const handleExport = async (row: ReportInfo, fmt: string) => {
     ElMessage.error('导出失败，请重试')
   }
 }
+
+// 加载 PPT 模板列表
+const pptTemplates = ref<Array<{ id: string; name: string; description: string; file: string; layouts_count: number }>>([])
+onMounted(async () => {
+  try {
+    const res = await reportsApi.listPptTemplates()
+    pptTemplates.value = (res.data?.items || []) as any
+  } catch {
+    pptTemplates.value = []
+  }
+})
 
 const handleFileChange = (file: File) => {
   uploadFile.value = file
@@ -167,6 +194,48 @@ const handleUpload = async () => {
   }
 }
 
+const openPushDialog = (row: ReportInfo) => {
+  pushReportId.value = row.id
+  pushFormat.value = 'pdf'
+  pushVisible.value = true
+}
+
+const handlePushAll = () => {
+  if (reports.value.length === 0) {
+    ElMessage.warning('没有可推送的报告')
+    return
+  }
+  // 默认推送最新一条报告
+  openPushDialog(reports.value[0])
+}
+
+const handlePushReport = async () => {
+  if (!pushReportId.value) return
+  pushLoading.value = true
+  try {
+    const res = await notificationApi.pushReport({
+      report_id: pushReportId.value,
+      format: pushFormat.value,
+    })
+    const data = res.data
+    const total = data?.total ?? 0
+    const results = data?.results ?? {}
+    const successCount = Object.values(results).filter((v: any) => v).length
+    const failCount = total - successCount
+    if (failCount === 0) {
+      ElMessage.success(`报告已成功推送到 ${total} 个邮箱`)
+    } else {
+      ElMessage.warning(`推送完成：${successCount} 成功，${failCount} 失败`)
+    }
+    pushVisible.value = false
+  } catch (err: any) {
+    const msg = err?.response?.data?.detail || '推送失败，请检查是否已配置通知规则'
+    ElMessage.error(msg)
+  } finally {
+    pushLoading.value = false
+  }
+}
+
 onMounted(() => {
   fetchReports()
 })
@@ -186,6 +255,7 @@ onMounted(() => {
               style="width: 320px"
               clearable
             />
+            <el-button type="warning" :icon="Promotion" @click="handlePushAll">报告推送</el-button>
             <el-button type="primary" :icon="Upload" @click="uploadVisible = true">上传报告</el-button>
             <el-button :icon="Refresh" @click="fetchReports" circle title="刷新列表"></el-button>
           </div>
@@ -222,24 +292,37 @@ onMounted(() => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right" align="center">
+        <el-table-column label="操作" width="360" fixed="right" align="center">
           <template #default="{ row }">
             <el-button type="primary" size="small" :icon="View" @click="handlePreview(row)">
               预览
             </el-button>
-            <el-dropdown trigger="click" @command="(fmt: string) => handleExport(row, fmt)">
+            <el-dropdown trigger="click" @command="(cmd: {fmt: string; template_id?: string}) => handleExport(row, cmd)">
               <el-button type="success" size="small" :icon="Download">
                 导出
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
-                  <el-dropdown-item command="docx">Word 文档 (.docx)</el-dropdown-item>
-                  <el-dropdown-item command="pdf">PDF 文档 (.pdf)</el-dropdown-item>
-                  <el-dropdown-item command="pptx">PPT 演示 (.pptx)</el-dropdown-item>
+                  <el-dropdown-item :command="{fmt: 'md'}">Markdown (.md)</el-dropdown-item>
+                  <el-dropdown-item :command="{fmt: 'docx'}">Word 文档 (.docx)</el-dropdown-item>
+                  <el-dropdown-item :command="{fmt: 'pdf'}">PDF 文档 (.pdf)</el-dropdown-item>
+                  <el-sub-menu v-if="pptTemplates.length > 0" teleported>
+                    <template #title>PPT 演示 (.pptx)</template>
+                    <el-dropdown-item
+                      v-for="t in pptTemplates"
+                      :key="t.id"
+                      :command="{fmt: 'pptx', template_id: t.id}"
+                    >
+                      {{ t.name }}
+                    </el-dropdown-item>
+                  </el-sub-menu>
+                  <el-dropdown-item v-else :command="{fmt: 'pptx'}">PPT 演示 (.pptx)</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+            <el-button type="warning" size="small" :icon="Promotion" @click="openPushDialog(row)">
+              推送
+            </el-button>
             <el-popconfirm
               title="确认删除该研报？"
               confirm-button-text="确认删除"
@@ -316,6 +399,36 @@ onMounted(() => {
       </div>
       <el-divider />
       <div class="markdown-body" v-html="renderedMarkdown"></div>
+    </el-dialog>
+
+    <!-- 报告推送弹窗 -->
+    <el-dialog
+      v-model="pushVisible"
+      title="推送报告到邮箱"
+      width="450px"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="100px">
+        <el-form-item label="导出格式">
+          <el-select v-model="pushFormat" style="width: 100%">
+            <el-option
+              v-for="opt in pushFormatOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="推送目标">
+          <div style="color: var(--scdc-ink-light); font-size: 13px;">
+            将推送到所有已启用的邮件通知规则邮箱
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pushVisible = false">取消</el-button>
+        <el-button type="warning" :loading="pushLoading" @click="handlePushReport">确认推送</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>

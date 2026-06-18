@@ -15,6 +15,7 @@ AnalyzerAgent（AI 分析 Agent）
 - 降级到规则分析确保系统在 LLM 故障时仍能产出可用结果，不中断流水线
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -112,7 +113,7 @@ The analysis MUST be structured into the following dimensions (do NOT use any ot
 
 {historical_section}REQUIREMENTS:
 1. Write a substantive executive summary (200-400 words) that synthesizes findings into a coherent narrative, covering ALL the dimensions above. Include key numbers, specific company names, and directional trends where available.
-2. For EACH dimension above, extract 1-3 insights. Total 5-8 insights across all dimensions. For EACH insight:
+2. For EACH dimension above, extract **at least 3** insights (target 3-5 per dimension). Total 10-20 insights across all dimensions. If data is insufficient, prefer 3-4 per dimension with caveats. For EACH insight:
    - "conclusion": a one-sentence headline
    - "analysis": 2-4 sentence deep dive explaining the evidence, implications, and why it matters (80-150 words)
    - "evidence": URIs from the sources that support this insight
@@ -218,7 +219,9 @@ SOURCE MATERIALS:
             success=True,
             summary=combined_summary,
             insights=insights,
-            degraded=True
+            degraded=True,
+            rag_results_count=0,
+            rag_results=[]
         )
 
     async def execute(self, input_data: AnalyzerInput) -> AnalyzerOutput:
@@ -236,24 +239,75 @@ SOURCE MATERIALS:
             )
 
         context_snippets = []
+        rag_results: List[Dict[str, Any]] = []
         try:
             vectorstore = VectorStoreService()
             if vectorstore.collection_exists():
                 embedding_service = EmbeddingService()
-                embeddings = await embedding_service.embed_texts_or_empty([input_data.topic])
-                if embeddings and embeddings[0]:
-                    hits = vectorstore.search(embeddings[0], top_k=20)
-                    if hits:
-                        documents = [hit.get("text", "") for hit in hits]
-                        rerank_service = RerankService()
-                        reranked = await rerank_service.rerank(input_data.topic, documents)
-                        top_indices = [r["index"] for r in reranked[:3]]
-                        context_snippets = [documents[i] for i in top_indices]
-                        logger.info(f"Retrieved {len(hits)} vector hits, reranked to {len(context_snippets)} context snippets for topic '{input_data.topic}'")
-                    else:
-                        logger.info(f"No vector hits found for topic '{input_data.topic}'")
+                rerank_service = RerankService()
+
+                # 多关键词检索源:expanded_keywords 优先,topic 兜底
+                if input_data.expanded_keywords:
+                    query_list = list(input_data.expanded_keywords)
+                    topic_included = False
+                else:
+                    query_list = [input_data.topic]
+                    topic_included = True
+                logger.info(
+                    "RAG using %d query terms (expanded_keywords=%d, topic included=%s)",
+                    len(query_list), len(input_data.expanded_keywords or []), topic_included
+                )
+
+                # 并行嵌入所有关键词
+                all_embs = await asyncio.gather(
+                    *[embedding_service.embed_texts_or_empty([q]) for q in query_list],
+                    return_exceptions=True
+                )
+
+                # 对每条嵌入做搜索,合并 hits(按 text 去重,保留首次出现)
+                seen_texts: set = set()
+                all_hits: list = []
+                for embs in all_embs:
+                    if isinstance(embs, Exception) or not embs:
+                        continue
+                    emb = embs[0]
+                    try:
+                        hits = vectorstore.search(query_vector=emb, top_k=20)
+                    except Exception as e:
+                        logger.warning("vectorstore.search failed: %s", e)
+                        continue
+                    for h in hits or []:
+                        text = h.get("text", "")
+                        if text and text not in seen_texts:
+                            seen_texts.add(text)
+                            all_hits.append(h)
+
+                if all_hits:
+                    try:
+                        reranked = await rerank_service.rerank(
+                            query=input_data.topic,
+                            documents=[h["text"] for h in all_hits]
+                        )
+                        context_snippets = reranked[:5]  # 原 top 3 → top 5
+                        logger.info(
+                            f"Retrieved {len(all_hits)} unique vector hits, reranked to {len(context_snippets)} context snippets for topic '{input_data.topic}'"
+                        )
+                    except Exception as e:
+                        logger.warning("Rerank failed, using raw hits: %s", e)
+                        context_snippets = all_hits[:5]
+                else:
+                    logger.info(f"No vector hits found for topic '{input_data.topic}'")
         except Exception as e:
             logger.warning(f"Failed to retrieve vector context for topic '{input_data.topic}': {e}")
+
+        # 构建 RAG 结果摘要列表
+        for snippet in context_snippets:
+            text = snippet.get("text", "")
+            rag_results.append({
+                "title": snippet.get("report_id", "") or f"chunk_{snippet.get('id', '')}",
+                "content_snippet": text[:200] if text else "",
+                "relevance_score": snippet.get("score", 0.0),
+            })
 
         prompt = self._build_prompt(input_data.topic, input_data.cleaned_items, input_data.dimensions, context_snippets if context_snippets else None)
         try:
@@ -297,7 +351,9 @@ SOURCE MATERIALS:
                 task_id=input_data.task_id,
                 success=True,
                 summary=summary,
-                insights=validated_insights
+                insights=validated_insights,
+                rag_results_count=len(rag_results),
+                rag_results=rag_results
             )
         except Exception as e:
             logger.error(f"AnalyzerAgent LLM execution failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")

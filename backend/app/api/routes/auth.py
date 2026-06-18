@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import create_access_token, verify_password
 from app.models.user import User
+from app.api.deps import get_current_active_user
 from app.api.responses import success_response, ResponseModel
 from app.schemas.auth import RegisterIn
 from app.services.captcha import generate_captcha, validate_captcha
@@ -143,4 +144,28 @@ async def register(
         "username": user.username,
         "email": user.email,
         "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+    })
+
+
+@router.get("/me", response_model=ResponseModel)
+async def read_me(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    """
+    获取当前登录用户信息
+
+    用途：
+    - 前端应用初始化（main.ts）调用,验证 token 有效性
+    - 前端 onMounted 调以确认 fresh user state（Phase 7 修复 stale token 用）
+    - token 失效时依赖 get_current_active_user 自动 401,前端 client.ts 会清 token + 触发重登
+
+    返回字段与登录响应中的 user 字段保持一致,前端可以无差别使用。
+    """
+    return success_response(data={
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "role": current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role),
+        "status": current_user.status,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
     })

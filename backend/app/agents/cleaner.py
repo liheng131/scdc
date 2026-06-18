@@ -20,7 +20,7 @@ from app.schemas.agent import CleanerInput, CleanedItem, CleanerOutput, Collecte
 logger = logging.getLogger(__name__)
 
 class CleanerAgent:
-    def __init__(self, min_content_length: int = 20, max_chunk_size: int = 1000):
+    def __init__(self, min_content_length: int = 10, max_chunk_size: int = 1000):
         """
         min_content_length: 内容最短阈值（字符），低于此长度的条目丢弃
         max_chunk_size: 文本分块大小，用于生成便于 LLM 处理的上下文块
@@ -108,29 +108,47 @@ class CleanerAgent:
         logger.info(f"CleanerAgent started for task_id: {input_data.task_id}, processing {len(input_data.raw_items)} items")
 
         if not input_data.raw_items:
-            return CleanerOutput(task_id=input_data.task_id, success=True, cleaned_items=[], total_removed=0)
+            return CleanerOutput(
+                task_id=input_data.task_id,
+                success=True,
+                cleaned_items=[],
+                total_removed=0,
+                cleaning_operations={
+                    "duplicates_removed": 0,
+                    "low_quality_filtered": 0,
+                    "format_standardized": 0,
+                },
+            )
 
         seen_uris: Set[str] = set()
         seen_fingerprints: Set[str] = set()
         cleaned_list: List[CleanedItem] = []
         removed_count = 0
 
+        # 清洗操作统计
+        duplicates_removed = 0
+        low_quality_filtered = 0
+        format_standardized = 0
+
         for item in input_data.raw_items:
             # 0 乱码/非可读内容过滤
             clean_text = item.content.strip()
             if self._is_garbled_content(clean_text):
+                low_quality_filtered += 1
                 removed_count += 1
                 logger.warning(f"Removed item '{item.title}': garbled/non-readable content detected")
                 continue
 
             # ① 过滤过短的低质内容
             if len(clean_text) < self.min_content_length:
+                low_quality_filtered += 1
                 removed_count += 1
                 logger.debug(f"Removed item '{item.title}': too short ({len(clean_text)} chars)")
                 continue
 
             # ② URI 去重：相同 URL 只保留首次出现
             if item.source_uri in seen_uris:
+                duplicates_removed += 1
                 removed_count += 1
                 logger.debug(f"Removed item '{item.title}': duplicate URI {item.source_uri}")
                 continue
@@ -138,6 +156,7 @@ class CleanerAgent:
             # ③ 内容指纹去重：不同 URL 但内容相同的条目也排除
             fingerprint = self._get_content_fingerprint(clean_text)
             if fingerprint in seen_fingerprints:
+                duplicates_removed += 1
                 removed_count += 1
                 logger.debug(f"Removed item '{item.title}': duplicate content fingerprint")
                 continue
@@ -148,6 +167,10 @@ class CleanerAgent:
             # ④ 文本分块（便于后续 LLM 阶段处理）
             chunks = self._chunk_text(clean_text)
             summary = clean_text[:200] + ("..." if len(clean_text) > 200 else "")
+
+            # 如果进行了分块处理，计为格式标准化
+            if len(chunks) > 0:
+                format_standardized += 1
 
             cleaned_list.append(CleanedItem(
                 source_type=item.source_type,
@@ -164,5 +187,10 @@ class CleanerAgent:
             task_id=input_data.task_id,
             success=True,
             cleaned_items=cleaned_list,
-            total_removed=removed_count
+            total_removed=removed_count,
+            cleaning_operations={
+                "duplicates_removed": duplicates_removed,
+                "low_quality_filtered": low_quality_filtered,
+                "format_standardized": format_standardized,
+            },
         )

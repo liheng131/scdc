@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "description": "PPT 母版模板清单。所有 .pptx 必须是有效 Office Open XML 格式，命名 template{N}.pptx (N=1,2,3...)",
+  "templates": [
+    {
+      "id": "template1",
+      "file": "template1.pptx",
+      "name": "产业月报 · 深色商务风",
+      "description": "深色底色 + 高对比标题，适合 LED/制造/产业类月报",
+      "layouts_hint": {
+        "cover": ["1_标题幻灯片", "标题幻灯片"],
+        "section": ["3_标题幻灯片", "4_标题幻灯片", "5_标题幻灯片", "6_标题幻灯片"],
+        "content": ["1_标题和内容", "标题和内容", "自定义版式", "1_自定义版式"]
+      }
+    },
+    {
+      "id": "template2",
+      "file": "template2.pptx",
+      "name": "项目简报 · 表格密集风",
+      "description": "白底 + 大量表格占位符，适合项目签约/招标类简报",
+      "layouts_hint": {
+        "cover": ["1_标题幻灯片", "标题幻灯片"],
+        "section": ["3_标题幻灯片", "5_标题幻灯片"],
+        "content": ["1_标题和内容", "标题和内容", "自定义版式"]
+      }
+    },
+    {
+      "id": "template3",
+      "file": "template3.pptx",
+      "name": "友商动态 · 卡片对比风",
+      "description": "卡片化布局，适合友商/竞品对比类报告",
+      "layouts_hint": {
+        "cover": ["1_标题幻灯片", "标题幻灯片"],
+        "section": ["3_标题幻灯片"],
+        "content": ["1_标题和内容", "标题和内容"]
+      }
+    }
+  ]
+}

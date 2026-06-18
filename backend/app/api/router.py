@@ -9,7 +9,7 @@ API 路由聚合模块
 
 from fastapi import APIRouter, Depends
 from app.api.responses import success_response, ResponseModel
-from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, workflow, settings, metrics
+from app.api.routes import auth, data_sources, collected_records, parsers, crawlers, search, agents, tasks, triggers, schedules, events, notifications, reports, workflow, settings, metrics, attachments, templates
 from app.services.anysearch import AnySearchService, anysearch_health, DEFAULT_BACKEND
 from app.schemas.search import SearchRequest
 from app.api.deps import get_current_active_user
@@ -36,6 +36,8 @@ api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(workflow.router, prefix="/workflow", tags=["workflow"])
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_router.include_router(metrics.router, prefix="/metrics-json", tags=["metrics"])
+api_router.include_router(attachments.router, prefix="/attachments", tags=["attachments"])
+api_router.include_router(templates.router, tags=["templates"])
 
 # 共享一个 AnySearchService 实例给健康检查用
 _anysearch_probe = AnySearchService()
