@@ -39,6 +39,66 @@ def _sanitize_text(text: str, max_len: int = 300) -> str:
     return text[:max_len]
 
 
+# 维度 -> 图表类型映射（用于分析阶段生成 chart_plan）
+DIMENSION_CHART_MAP: Dict[str, str] = {
+    "宏观经济环境": "bar",
+    "宏观经济": "bar",
+    "行业形势与趋势": "line",
+    "行业趋势": "line",
+    "竞争格局与对手": "comparison",
+    "竞争格局": "comparison",
+    "细分板块分析": "pie",
+    "细分板块": "pie",
+}
+
+
+def _build_chart_plan(insights: List["Insight"]) -> List[Dict[str, Any]]:
+    """根据 insights 的 dimension 字段生成图表规划。
+
+    每个 insight 维度对应一种图表类型，便于 Reporter 阶段渲染。
+    data_points 在 Reporter 阶段填充。
+
+    对每个 insight 同时生成:
+    - 一张 "section_start" 概览图(默认用 bar/line/pie/comparison 之一)
+    - 一张 "section_end" 详细图(支持 table/matrix/flow 等其它类型)
+
+    这样 Reporter 既能在章节开头给出可视化概览,也能在章节末尾给出补充图表。
+    """
+    chart_plan: List[Dict[str, Any]] = []
+    for insight in insights:
+        dim = insight.dimension or "综合分析"
+        chart_type = DIMENSION_CHART_MAP.get(dim, "bar")
+        description_src = insight.analysis or insight.conclusion or ""
+
+        # 概览图:章节开头 - 直观展示该维度的核心数据
+        chart_plan.append({
+            "dimension": dim,
+            "chart_type": chart_type,
+            "title": f"{dim}分析概览",
+            "data_points": [],
+            "position": "section_start",
+            "description": description_src[:100],
+        })
+
+        # 详细图:章节末尾 - 表格 / 矩阵 / 流程图
+        # 推断详细图类型: 数字/指标类 -> table, 多维 -> matrix, 链路/关系 -> flow
+        detail_type = "table"
+        dim_l = (dim or "").lower()
+        if any(kw in dim for kw in ["矩阵", "能力", "画像", "评估"]):
+            detail_type = "matrix"
+        elif any(kw in dim for kw in ["流程", "链路", "path", "flow", "周期"]):
+            detail_type = "flow"
+        chart_plan.append({
+            "dimension": dim,
+            "chart_type": detail_type,
+            "title": f"{dim}详细数据",
+            "data_points": [],
+            "position": "section_end",
+            "description": description_src[:100],
+        })
+    return chart_plan
+
+
 class AnalyzerAgent:
     def __init__(self):
         self.llm_provider = rumtime_config.get("llm_provider")
@@ -221,7 +281,8 @@ SOURCE MATERIALS:
             insights=insights,
             degraded=True,
             rag_results_count=0,
-            rag_results=[]
+            rag_results=[],
+            chart_plan=_build_chart_plan(insights),
         )
 
     async def execute(self, input_data: AnalyzerInput) -> AnalyzerOutput:
@@ -353,7 +414,8 @@ SOURCE MATERIALS:
                 summary=summary,
                 insights=validated_insights,
                 rag_results_count=len(rag_results),
-                rag_results=rag_results
+                rag_results=rag_results,
+                chart_plan=_build_chart_plan(validated_insights),
             )
         except Exception as e:
             logger.error(f"AnalyzerAgent LLM execution failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")

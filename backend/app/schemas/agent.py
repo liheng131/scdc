@@ -117,6 +117,10 @@ class AnalyzerOutput(BaseModel):
     degraded: bool = False
     rag_results_count: int = 0  # RAG 检索结果数量
     rag_results: List[Dict[str, Any]] = []  # RAG 结果摘要列表，每项包含 title, content_snippet, relevance_score
+    chart_plan: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="图表规划：每个分析维度的图表类型、数据点、位置"
+    )
 
 # ============================================================
 # Reporter（报告）阶段

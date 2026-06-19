@@ -139,8 +139,32 @@ class PPTTemplateService:
             # 无任何模板可用，回退到内置默认（与旧 generate_pptx 行为一致）
             return self._fallback_pptx(report, chart_images)
 
-        # 每次生成都从模板文件重新加载 Presentation，确保干净状态
+        # 每次生成都从模板文件重新加载 Presentation,确保干净状态
         prs = Presentation(ctx.file_path)
+
+        # ── 关键步骤: 清空模板原 slide,只保留 slide_masters / slide_layouts ──
+        # 原因:模板是用户手工制作的"设计母版",里面通常有 5 张示例 slide。
+        # 如果不清空,新追加的报告 slide 会接在示例 slide 后面,PowerPoint
+        # 默认从第 1 张展示,导致用户看到模板原内容("月度市场动态(国内)")
+        # 而不是报告内容。
+        try:
+            original_slide_count = len(prs.slides)
+            xml_slides = prs.slides._sldIdLst
+            # 必须先复制成 list 再 remove,否则会边遍历边修改
+            slides_to_remove = list(xml_slides)
+            for slide_id in slides_to_remove:
+                xml_slides.remove(slide_id)
+            logger.info(
+                "[PPT-TEMPLATE] Cleared %d original slides from template '%s', "
+                "keeping only slide_masters/slide_layouts for design consistency",
+                original_slide_count, template_id,
+            )
+        except Exception as clear_e:
+            logger.warning(
+                "[PPT-TEMPLATE] Failed to clear original slides from template '%s': "
+                "%s. Generated PPT may contain template example slides.",
+                template_id, clear_e, exc_info=True,
+            )
 
         # 1. 解析报告 Markdown 为结构化大纲
         outline = self._parse_outline(report)
