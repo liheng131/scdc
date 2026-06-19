@@ -59,21 +59,21 @@ async def seed():
             print("[--] 管理员账号已存在，跳过")
 
         # 2. AI 模型配置
-        # LLM 模型
+        # LLM 模型 (gpustack)
         existing_llm = await session.execute(
             select(AiModelConfig).where(AiModelConfig.model_type == "llm", AiModelConfig.is_default == True)
         )
         if not existing_llm.scalar_one_or_none():
             llm_config = AiModelConfig(
-                provider="ollama",
-                model_name="qwen2.5:latest",
+                provider="gpustack",
+                model_name="qwen3-vl-32b-instruct-gguf",
                 model_type="llm",
-                base_url="http://localhost:11434",
+                base_url="http://120.79.96.231:6003",
                 api_key="",
                 is_default=True,
             )
             session.add(llm_config)
-            print("[OK] 创建默认 LLM 模型配置: ollama / qwen2.5:latest")
+            print("[OK] 创建默认 LLM 模型配置: gpustack / qwen3-vl-32b-instruct-gguf")
         else:
             print("[--] 默认 LLM 模型配置已存在，跳过")
 
@@ -94,6 +94,24 @@ async def seed():
             print("[OK] 创建默认 Embedding 模型配置: ollama / nomic-embed-text")
         else:
             print("[--] 默认 Embedding 模型配置已存在，跳过")
+
+        # Rerank 模型 (gpustack)
+        existing_rerank = await session.execute(
+            select(AiModelConfig).where(AiModelConfig.model_type == "rerank", AiModelConfig.is_default == True)
+        )
+        if not existing_rerank.scalar_one_or_none():
+            rerank_config = AiModelConfig(
+                provider="gpustack",
+                model_name="lb-reranker-0.5b-v1.0-gguf",
+                model_type="rerank",
+                base_url="http://120.79.96.231:6003",
+                api_key="",
+                is_default=True,
+            )
+            session.add(rerank_config)
+            print("[OK] 创建默认 Rerank 模型配置: gpustack / lb-reranker-0.5b-v1.0-gguf")
+        else:
+            print("[--] 默认 Rerank 模型配置已存在，跳过")
 
         # 3. 通知规则（邮件推送）
         existing_rules = await session.execute(
