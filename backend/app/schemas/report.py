@@ -25,7 +25,7 @@ class ReportCreate(BaseModel):
     content_markdown: Optional[str] = None
     storage_ref: Optional[str] = None
     images: Optional[List[ReportImageItem]] = None
-    chart_images: Optional[List[Dict[str, str]]] = None  # [{"title": str, "base64": str}]
+    chart_images: Optional[List[Dict[str, Any]]] = None  # [{"title": str, "base64": str, "section"?: str, "position"?: int}]
 
 class ReportUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)

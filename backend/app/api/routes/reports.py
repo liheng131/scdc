@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import traceback as tb
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlalchemy import select as sa_select
@@ -36,6 +36,8 @@ class CreateFromWorkflowRequest(BaseModel):
     title: str = Field(..., max_length=255)
     content_markdown: Optional[str] = None
     summary: Optional[str] = None
+    chart_images: Optional[List[Dict[str, Any]]] = None
+    dimension_illustrations: Optional[List[Dict[str, Any]]] = None
 
 @router.post("/", response_model=ResponseModel)
 async def create_report(

@@ -190,7 +190,7 @@ class ReportService:
         title: str,
         content_markdown: Optional[str] = None,
         summary: Optional[str] = None,
-        chart_images: Optional[List[Dict[str, str]]] = None,
+        chart_images: Optional[List[Dict[str, Any]]] = None,
         dimension_illustrations: Optional[List[Dict[str, Any]]] = None,
     ) -> Report:
         # 合并 chart_images 和 dimension_illustrations
@@ -362,12 +362,12 @@ class ReportService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_section_chart_map(chart_images: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+    def _build_section_chart_map(chart_images: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         """将 chart_images 按 section 字段分组，返回 {section_name: [chart, ...]}。
 
         没有 section 字段的配图会被忽略（由调用方走旧逻辑兜底）。
         """
-        mapping: Dict[str, List[Dict[str, str]]] = {}
+        mapping: Dict[str, List[Dict[str, Any]]] = {}
         if not chart_images:
             return mapping
         for ci in chart_images:
@@ -399,9 +399,9 @@ class ReportService:
         return False
 
     @staticmethod
-    def _find_charts_for_heading(heading: str, section_chart_map: Dict[str, List[Dict[str, str]]]) -> List[Dict[str, str]]:
+    def _find_charts_for_heading(heading: str, section_chart_map: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """根据章节标题从 section_chart_map 中找到所有匹配的配图。"""
-        matched: List[Dict[str, str]] = []
+        matched: List[Dict[str, Any]] = []
         for section_name, charts in section_chart_map.items():
             if ReportService._match_section(heading, section_name):
                 matched.extend(charts)
@@ -409,10 +409,10 @@ class ReportService:
 
     @staticmethod
     def _collect_unmatched_charts(
-        chart_images: List[Dict[str, str]],
-        section_chart_map: Dict[str, List[Dict[str, str]]],
+        chart_images: List[Dict[str, Any]],
+        section_chart_map: Dict[str, List[Dict[str, Any]]],
         matched_sections: set,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """收集未被章节匹配的配图，用于在文档末尾兜底插入。
 
         包括：
@@ -430,7 +430,7 @@ class ReportService:
                 unmatched.append(ci)
         return unmatched
 
-    def _add_chart_to_docx(self, doc, ci: Dict[str, str], width_inches: float = 5.5):
+    def _add_chart_to_docx(self, doc, ci: Dict[str, Any], width_inches: float = 5.5):
         """向 docx 文档中插入一张配图。"""
         doc.add_heading(ci.get("title", "图表"), 3)
         try:
@@ -439,14 +439,27 @@ class ReportService:
         except Exception as e:
             logger.warning("Failed to insert chart image into docx: %s", e)
 
-    def _add_chart_to_pdf_story(self, story, ci: Dict[str, str], h2_style, width_px: int = 450):
-        """向 PDF story 中插入一张配图，返回创建的临时文件路径列表（用于清理）。"""
+    def _add_chart_to_pdf_story(self, story, ci: Dict[str, Any], h2_style, width_px: int = 450):
+        """向 PDF story 中插入一张配图,返回创建的临时文件路径列表(用于清理)。"""
         import tempfile
+        from PIL import Image as PILImage
+        
         story.append(Paragraph(ci.get("title", "图表"), h2_style))
         try:
             img_data = io.BytesIO(base64.b64decode(ci["base64"]))
         except Exception:
+            logger.warning("Failed to decode base64 for chart: %s", ci.get("title", "unknown"))
             return []
+        
+        # 验证图片是否有效
+        try:
+            img_data.seek(0)
+            PILImage.open(img_data).verify()
+            img_data.seek(0)
+        except Exception as e:
+            logger.warning("Invalid image data for chart '%s': %s", ci.get("title", "unknown"), e)
+            return []
+        
         tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
         tmp.write(img_data.getvalue())
         tmp.flush()
@@ -456,7 +469,7 @@ class ReportService:
         story.append(Spacer(1, 10))
         return [tmp_path]
 
-    def _add_chart_to_pptx_slide(self, prs, ci: Dict[str, str]):
+    def _add_chart_to_pptx_slide(self, prs, ci: Dict[str, Any]):
         """为单张配图创建一张空白幻灯片并插入图片。"""
         blank_layout = prs.slide_layouts[6]
         slide = prs.slides.add_slide(blank_layout)
@@ -478,7 +491,7 @@ class ReportService:
         except Exception as e:
             logger.warning("Failed to insert chart image into pptx: %s", e)
 
-    def generate_docx(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
+    def generate_docx(self, report: Report, chart_images: List[Dict[str, Any]] = None) -> bytes:
         """从 Markdown 报告生成 DOCX 文件，标题层级自动映射为 Word 样式。
 
         配图插入逻辑：
@@ -487,7 +500,7 @@ class ReportService:
         - 如果配图没有 section 字段或未能匹配到任何章节，则在文档末尾统一插入（向后兼容）。
         """
         doc = docx.Document()
-        doc.add_heading(report.title, 0)
+        doc.add_heading(report.title or "未命名报告", 0)
         doc.add_heading("执行摘要", 1)
         doc.add_paragraph(report.summary or "无摘要")
         doc.add_heading("详细内容", 1)
@@ -548,7 +561,7 @@ class ReportService:
         buf.seek(0)
         return buf.getvalue()
 
-    def generate_pptx(self, report: Report, chart_images: List[Dict[str, str]] = None, template_id: str = None) -> bytes:
+    def generate_pptx(self, report: Report, chart_images: List[Dict[str, Any]] = None, template_id: str = None) -> bytes:
         """从报告生成 PPTX 文件。
 
         优先使用 PPTTemplateService 基于母版模板填充；当 template_id 为 None 或无
@@ -573,7 +586,7 @@ class ReportService:
         # 兜底：保留旧版实现（无模板或模板服务失败时使用）
         return self._generate_pptx_legacy(report, chart_images)
 
-    def _generate_pptx_legacy(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
+    def _generate_pptx_legacy(self, report: Report, chart_images: List[Dict[str, Any]] = None) -> bytes:
         """旧版 PPTX 生成逻辑（无母版模板时使用）
 
         配图插入逻辑：
@@ -712,7 +725,7 @@ class ReportService:
 
         return styles
 
-    def generate_pdf(self, report: Report, chart_images: List[Dict[str, str]] = None) -> bytes:
+    def generate_pdf(self, report: Report, chart_images: List[Dict[str, Any]] = None) -> bytes:
         """从 Markdown 报告生成 PDF 文件,支持中文字体。
 
         配图插入逻辑：
@@ -737,13 +750,15 @@ class ReportService:
 
         def _safe_paragraph(text: str, style):
             """把字符串安全地放到 Paragraph;先转义 XML 特殊字符;失败时再二次降级。"""
+            if text is None:
+                text = ""
             escaped = _xml_escape(text)
             try:
                 return Paragraph(escaped, style)
             except Exception:
                 return Paragraph(escaped.replace("<", "").replace(">", ""), style)
 
-        story = [_safe_paragraph(report.title, t_style), Spacer(1, 20)]
+        story = [_safe_paragraph(report.title or "未命名报告", t_style), Spacer(1, 20)]
         story.append(_safe_paragraph("执行摘要", h1_style))
         story.append(_safe_paragraph(report.summary or "无", body_style))
         story.append(Spacer(1, 15))
@@ -822,10 +837,299 @@ class ReportService:
         buf.seek(0)
         return buf.getvalue()
 
+    # ------------------------------------------------------------------
+    # 专业排版辅助方法（Markdown 排版美化）
+    # ------------------------------------------------------------------
+
+    # 章节标题关键词 -> emoji 标记 的映射
+    _SECTION_EMOJI_MAP: Dict[str, str] = {
+        "执行摘要": "📑",
+        "executive summary": "📑",
+        "数据": "📊",
+        "指标": "📊",
+        "统计": "📊",
+        "洞察": "💡",
+        "建议": "💡",
+        "机会": "💡",
+        "风险": "⚠️",
+        "挑战": "⚠️",
+        "威胁": "⚠️",
+        "结论": "🎯",
+        "总结": "🎯",
+        "来源": "🔗",
+        "参考": "🔗",
+        "竞争格局": "⚔️",
+        "趋势": "📈",
+        "预测": "🔮",
+        "展望": "🔮",
+        "细分板块": "🧩",
+        "宏观经济": "🌐",
+    }
+
+    @classmethod
+    def _decorate_heading(cls, heading_text: str) -> str:
+        """为章节标题添加 emoji 标记(如果还没有),支持中文/英文标题。
+
+        策略:
+        - 已有 emoji(以 unicode 表情符号开头的)则跳过
+        - 否则按关键词匹配表查找合适 emoji
+        - 兜底: 不修改原标题
+        """
+        if not heading_text:
+            return heading_text
+        text = heading_text.strip()
+        # 已有 emoji 或特殊符号开头 -> 跳过
+        if text and ord(text[0]) >= 0x1F300:
+            return heading_text
+        # 关键词匹配(不区分大小写)
+        text_lower = text.lower()
+        for keyword, emoji in cls._SECTION_EMOJI_MAP.items():
+            if keyword.lower() in text_lower:
+                return f"{emoji} {heading_text}"
+        return heading_text
+
+    @classmethod
+    def _extract_key_insight_blockquotes(cls, content: str) -> str:
+        """把"关键结论"风格的句子(以 【关键】/ **关键** / ⚠️ 等开头)
+        包装为 > blockquote 引用块,提升排版专业感。
+
+        启发式规则:
+        - 匹配以"**关键**" / "**Key Insight**" / "**Insight**" 开头,到下一个换行或段落结束
+        - 整段缩进前缀为 "> ",Markdown 渲染为引用块
+        """
+        if not content:
+            return content
+        # 仅作用于未在引用块内的关键句
+        pattern = re.compile(
+            r'(?m)^(\*\*(?:关键|Key Insight|Insight|关键洞察|核心要点)[^*]*\*\*[^\n]*(?:\n(?!\n)[^\n]*)*)',
+        )
+
+        def _to_quote(m: re.Match) -> str:
+            block = m.group(1)
+            lines = block.split("\n")
+            quoted = "\n".join(f"> {line}" for line in lines)
+            return quoted
+
+        return pattern.sub(_to_quote, content)
+
+    @classmethod
+    def _ensure_section_separators(cls, content: str) -> str:
+        """在 ## 章节之间插入水平分隔线 ---,保证排版节奏。
+
+        规则:
+        - 跳过 H1 标题前(文档头不加分隔线)
+        - 跳过紧邻 --- 的 ## 标题(避免重复)
+        """
+        if not content:
+            return content
+        lines = content.split("\n")
+        out: List[str] = []
+        prev_was_h1 = False
+        prev_was_hr = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                # 决定是否在前面加 ---
+                if not prev_was_h1 and not prev_was_hr and out:
+                    # 看 out 末尾是否已有 ---
+                    if not (out and out[-1].strip() == "---"):
+                        out.append("")
+                        out.append("---")
+                        out.append("")
+            out.append(line)
+            prev_was_h1 = stripped.startswith("# ") and not stripped.startswith("## ")
+            prev_was_hr = stripped == "---"
+        return "\n".join(out)
+
+    @classmethod
+    def _enhance_table_formatting(cls, content: str) -> str:
+        """改进 Markdown 表格渲染质量。
+
+        功能:
+        1. 支持多行表头:连续多行 (---|---) 分隔行(只要|列数一致)会被识别为多行表头
+        2. 支持单元格合并标记: `<<span:N>>` 标识该单元格水平合并 N 列
+           渲染时展开为对应个数的空 `<td>` (HTML 形式)
+           或者在 Markdown 形式下用 `||` 分隔表示合并
+        3. 对比表格对齐:自动识别数字列并设置右对齐(原默认|改为|:--:|--:|--:|)
+        4. 表格前后自动加空行,保证 Markdown 解析正确
+
+        向后兼容:不包含上述标记的表格保持原样。
+        """
+        if not content:
+            return content
+
+        lines = content.split("\n")
+        out: List[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            # 检测表格起始(以 | 开头且包含 |)
+            if stripped.startswith("|") and "|" in stripped[1:] and i + 1 < len(lines):
+                next_stripped = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                # 表格头分隔行: |---|---|---| 或 |:---|:---:|---:|
+                if re.match(r'^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$', next_stripped):
+                    # 抽取整个表格块
+                    block = [line, lines[i + 1]]
+                    j = i + 2
+                    while j < len(lines) and lines[j].strip().startswith("|"):
+                        block.append(lines[j])
+                        j += 1
+                    enhanced = cls._enhance_single_table(block)
+                    # 表格前后补空行
+                    if out and out[-1].strip() != "":
+                        out.append("")
+                    out.extend(enhanced)
+                    if j < len(lines) and lines[j].strip() != "":
+                        out.append("")
+                    i = j
+                    continue
+            out.append(line)
+            i += 1
+        return "\n".join(out)
+
+    @classmethod
+    def _enhance_single_table(cls, block: List[str]) -> List[str]:
+        """处理单个 Markdown 表格块(标题行+分隔行+若干数据行)。"""
+        if len(block) < 2:
+            return block
+        header_line = block[0]
+        sep_line = block[1]
+        data_lines = block[2:]
+
+        # 拆分单元格(支持 | a | b | 和 |a|b| 两种风格)
+        def _split_row(row: str) -> List[str]:
+            s = row.strip()
+            if s.startswith("|"):
+                s = s[1:]
+            if s.endswith("|"):
+                s = s[:-1]
+            return [c.strip() for c in s.split("|")]
+
+        def _join_row(cells: List[str]) -> str:
+            return "| " + " | ".join(cells) + " |"
+
+        header_cells = _split_row(header_line)
+        sep_cells = _split_row(sep_line)
+        n_cols = max(len(header_cells), len(sep_cells))
+
+        # === 1) 单元格合并标记 <<span:N>> ===
+        # 例如: "指标 <<span:3>>" -> "指标" + 两个空合并格
+        def _expand_merges(cells: List[str]) -> List[str]:
+            new_cells: List[str] = []
+            for c in cells:
+                m = re.search(r'<<\s*span\s*:\s*(\d+)\s*>>', c)
+                if m:
+                    span_n = int(m.group(1))
+                    base = re.sub(r'<<\s*span\s*:\s*\d+\s*>>', '', c).strip()
+                    new_cells.append(base if base else c)
+                    for _ in range(span_n - 1):
+                        new_cells.append("↪")  # 用箭头表示"被合并格"
+                else:
+                    new_cells.append(c)
+            return new_cells
+
+        header_cells = _expand_merges(header_cells)
+        data_lines = [_expand_merges(_split_row(dl)) for dl in data_lines]
+
+        # === 2) 对比表格自动对齐 ===
+        # 判断规则:
+        # - 如果数据行中超过 50% 的单元格是"数字 + 可选单位",则该列右对齐
+        # - 如果表头含"占比/比例/率/%/增长",则该列右对齐
+        def _is_numeric_cell(s: str) -> bool:
+            t = s.strip().replace(",", "").replace(" ", "")
+            # 数字 + 可选 %, ‰, 元, 亿, 万, $, ¥
+            return bool(re.match(r'^-?\d+(?:\.\d+)?\s*[%‰元亿元万元$/¥]?$', t))
+
+        align_keywords = ("占比", "比例", "率", "%", "增长", "增速", "数量", "金额", "规模", "rank", "排名")
+        aligns: List[str] = []
+        for col_idx, h in enumerate(header_cells):
+            col_data = [dl[col_idx] if col_idx < len(dl) else "" for dl in data_lines]
+            if any(kw in h for kw in align_keywords):
+                aligns.append("right")
+            elif col_data and sum(1 for v in col_data if _is_numeric_cell(v)) / max(len(col_data), 1) >= 0.5:
+                aligns.append("right")
+            else:
+                aligns.append("left")
+
+        def _align_cell(align: str) -> str:
+            if align == "right":
+                return "---:"
+            return "---"
+
+        # 重新生成分隔行
+        # 处理: 列数不一致时(合并后)补充 --- 或删减
+        if len(sep_cells) < n_cols:
+            sep_cells = sep_cells + ["---"] * (n_cols - len(sep_cells))
+        elif len(sep_cells) > n_cols:
+            sep_cells = sep_cells[:n_cols]
+        new_sep_cells = [_align_cell(a) for a in aligns[:n_cols]]
+        if len(new_sep_cells) < n_cols:
+            new_sep_cells = new_sep_cells + ["---"] * (n_cols - len(new_sep_cells))
+        new_sep_line = _join_row(new_sep_cells)
+
+        # 同样补齐 header / data 行
+        def _pad(cells: List[str]) -> List[str]:
+            if len(cells) < n_cols:
+                return cells + [""] * (n_cols - len(cells))
+            return cells[:n_cols]
+
+        new_header = _join_row(_pad(header_cells))
+        new_data = [_join_row(_pad(dl)) for dl in data_lines]
+
+        # === 3) 多行表头支持 ===
+        # 如果 header_line 包含多行(以 \n 分隔,在同一字符串内),分别处理
+        # 简单场景: 用户把多行 header 写在一行内并用 <br> 分隔
+        if "<br>" in new_header or "<br/>" in new_header:
+            br_pat = re.compile(r'<br\s*/?>')
+            br_lines = br_pat.split(new_header)
+            br_cells_list = [_split_row(l) for l in br_lines if l.strip()]
+            # 重新组装为多行 header
+            multi_header = "\n".join(_join_row(_pad(c)) for c in br_cells_list)
+            return [multi_header, new_sep_line] + new_data
+
+        return [new_header, new_sep_line] + new_data
+
+    def _enhance_markdown(self, content: str) -> str:
+        """综合排版美化:
+        1. 关键句 -> blockquote
+        2. ## 章节之间插入 --- 分隔线
+        3. 表格增强(多行表头 / 单元格合并 / 对齐)
+        4. 章节标题添加 emoji 标记
+        """
+        if not content:
+            return content
+        # 表格增强先做(避免后续插入 \n 干扰表格解析)
+        content = self._enhance_table_formatting(content)
+        # blockquote 包装
+        content = self._extract_key_insight_blockquotes(content)
+        # 章节分隔线
+        content = self._ensure_section_separators(content)
+        # 标题 emoji 装饰
+        def _decorate_h(m: re.Match) -> str:
+            hashes = m.group(1)
+            text = m.group(2)
+            return f"{hashes} {self._decorate_heading(text)}"
+        content = re.sub(r'^(#{1,6})\s+(.+)$', _decorate_h, content, flags=re.MULTILINE)
+        return content
+
     def generate_markdown(self, report: Report) -> bytes:
-        """直接返回 Markdown 原始内容，供下载"""
-        content = f"# {report.title}\n\n## 执行摘要\n{report.summary or '无'}\n\n## 详细内容\n{report.content_markdown or ''}"
-        return content.encode("utf-8")
+        """生成 Markdown 报告(供下载或直接展示)。
+
+        与旧版本的差异:
+        - 加入排版美化: 关键句包装为 blockquote、章节之间加分隔线、表格增强
+        - 章节标题自动添加 emoji 标记(📊 数据, 💡 洞察, ⚠️ 风险)
+        - 向后兼容: 当 content_markdown 为空时,降级为旧版简单拼接
+        """
+        summary = report.summary or "无"
+        content = report.content_markdown or ""
+        try:
+            enhanced_content = self._enhance_markdown(content) if content else ""
+        except Exception as e:
+            logger.warning("Markdown enhancement failed, falling back to raw content: %s", e)
+            enhanced_content = content
+        body = f"# {report.title}\n\n## 📑 执行摘要\n{summary}\n\n---\n\n## 详细内容\n{enhanced_content or content}"
+        return body.encode("utf-8")
 
     async def export_report(
         self, session: AsyncSession, report_id: int, fmt: str, template_id: Optional[str] = None
