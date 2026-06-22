@@ -6,7 +6,6 @@ pipeline {
     }
 
     stages {
-
         stage('Build Images') {
             steps {
                 echo '>>> 构建 Docker 镜像...'
