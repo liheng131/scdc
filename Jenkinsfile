@@ -24,7 +24,7 @@ pipeline {
                 '''
                 echo '>>> 启动/更新所有服务...'
                 sh '''
-                    docker compose -f ${COMPOSE_FILE} up -d --remove-orphans || true
+                    docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
                 '''
             }
         }
@@ -41,6 +41,16 @@ pipeline {
                         echo "等待后端启动... ($i/30)"
                         sleep 5
                     done
+                '''
+            }
+        }
+
+        stage('Pull Ollama Models') {
+            steps {
+                echo '>>> 拉取 Ollama 模型...'
+                sh '''
+                    docker exec scdc_ollama ollama pull nomic-embed-text || true
+                    docker exec scdc_ollama ollama pull qwen3-vl-32b-instruct-gguf || true
                 '''
             }
         }

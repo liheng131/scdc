@@ -140,8 +140,8 @@ async def lifespan(app: FastAPI):
                 encrypted_key = encrypt_api_key(api_key)
                 await conn.execute(
                     text("""
-                        INSERT INTO ai_model_configs (provider, model_name, model_type, base_url, api_key, is_default)
-                        VALUES (:provider, :model_name, 'llm', :base_url, :api_key, TRUE)
+                        INSERT INTO ai_model_configs (provider, model_name, model_type, base_url, api_key, is_default, created_at, updated_at)
+                        VALUES (:provider, :model_name, 'llm', :base_url, :api_key, TRUE, NOW(), NOW())
                     """),
                     {"provider": provider, "model_name": model_name, "base_url": base_url, "api_key": encrypted_key}
                 )
