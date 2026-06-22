@@ -17,6 +17,11 @@ pipeline {
 
         stage('Deploy Services') {
             steps {
+                echo '>>> 清理可能错误创建的挂载目录...'
+                sh '''
+                    find . -path '*/docker/prometheus/prometheus.yml' -type d -exec rm -rf {} + 2>/dev/null || true
+                    find . -path '*/docker/nginx/nginx.conf' -type d -exec rm -rf {} + 2>/dev/null || true
+                '''
                 echo '>>> 启动/更新所有服务...'
                 sh '''
                     docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
