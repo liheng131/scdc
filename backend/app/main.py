@@ -110,42 +110,37 @@ async def lifespan(app: FastAPI):
             """))
             result = await conn.execute(text("SELECT COUNT(*) FROM ai_model_configs"))
             count = result.scalar() or 0
-            if count == 0:
-                from app.core.runtime_config import rumtime_config
-                rumtime_config._ensure_loaded()
-                provider = rumtime_config.get("llm_provider", "")
-                base_url = rumtime_config.get("llm_base_url", "")
-                api_key = rumtime_config.get("llm_api_key", "")
-                model_name = rumtime_config.get("default_model", "")
-                # 连通性探测：避免把不可达的 base_url（如 Docker 模式下的 ollama:11434）
-                # 自动迁移到 DB，导致后续 host uvicorn 模式下该配置无法使用。
-                # 见 .trae/documents/fix-ollama-host-mode-base-url-and-healthcheck.md
-                import httpx as _httpx
-                try:
-                    async with _httpx.AsyncClient(timeout=5) as _client:
-                        _probe = await _client.get(f"{base_url.rstrip('/')}/api/tags")
-                        if _probe.status_code != 200:
-                            logger.warning(
-                                "llm_base_url '%s' 不通 (HTTP %d)，跳过自动迁移到 ai_model_configs",
-                                base_url, _probe.status_code,
-                            )
-                            return
-                except Exception as _e:
-                    logger.warning(
-                        "llm_base_url '%s' 连通性探测失败: %s；跳过自动迁移到 ai_model_configs（请在系统设置页手动添加）",
-                        base_url, _e,
-                    )
-                    return
-                from app.core.security import encrypt_api_key
-                encrypted_key = encrypt_api_key(api_key)
-                await conn.execute(
-                    text("""
-                        INSERT INTO ai_model_configs (provider, model_name, model_type, base_url, api_key, is_default, created_at, updated_at)
-                        VALUES (:provider, :model_name, 'llm', :base_url, :api_key, TRUE, NOW(), NOW())
-                    """),
-                    {"provider": provider, "model_name": model_name, "base_url": base_url, "api_key": encrypted_key}
+            from app.core.runtime_config import rumtime_config
+            rumtime_config._ensure_loaded()
+            provider = rumtime_config.get("llm_provider", "")
+            base_url = rumtime_config.get("llm_base_url", "")
+            api_key = rumtime_config.get("llm_api_key", "")
+            model_name = rumtime_config.get("default_model", "")
+            embedding_model = rumtime_config.get("embedding_model", "nomic-embed-text")
+            from app.core.security import encrypt_api_key
+            encrypted_key = encrypt_api_key(api_key)
+
+            # 按类型分别检查并补全，确保三种模型配置都存在
+            model_defaults = [
+                ("llm", provider, model_name, base_url, encrypted_key),
+                ("embedding", "ollama", embedding_model, base_url, ""),
+                ("rerank", provider, "bge-reranker-v2-m3", base_url, encrypted_key),
+            ]
+            for mtype, mprovider, mname, murl, mkey in model_defaults:
+                exist = await conn.execute(
+                    text("SELECT COUNT(*) FROM ai_model_configs WHERE model_type = :mt AND is_default = TRUE"),
+                    {"mt": mtype}
                 )
-                logger.info("Migrated existing LLM config to ai_model_configs table")
+                if (exist.scalar() or 0) == 0:
+                    await conn.execute(
+                        text("""
+                            INSERT INTO ai_model_configs (provider, model_name, model_type, base_url, api_key, is_default, created_at, updated_at)
+                            VALUES (:provider, :model_name, :model_type, :base_url, :api_key, TRUE, NOW(), NOW())
+                        """),
+                        {"provider": mprovider, "model_name": mname, "model_type": mtype,
+                         "base_url": murl, "api_key": mkey}
+                    )
+                    logger.info("Auto-inserted default %s model config: %s / %s @ %s", mtype, mprovider, mname, murl)
     except Exception as e:
         logger.warning("Failed to initialize ai_model_configs: %s", e)
     logger.info("Initializing workflow_runs table...")
