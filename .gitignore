@@ -57,3 +57,36 @@ docs/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Build/IDE/Debug outputs
+*.log
+*.err
+backend/tmp_pptx/
+backend/tests/output_*.pptx
+backend/tests/output_*.pdf
+backend/tests/e2e_results.json
+test_upload.txt
+apply_output.txt
+ppt_analysis_report.txt
+slide_analysis.txt
+template_analysis*.txt
+inspect*.txt
+debug_out.txt
+report_demo*.pptx
+report_demo*.pdf
+poc_*.pptx
+"模板*.pptx"
+
+# Local debug/test scripts
+debug_*.py
+check_pdf.py
+verify_ppt.py
+apply_tasks_ab*.py
+analyze_*.py
+poc_no_template.py
+test_direct_persist.py
+test_export_*.py
+test_null_title_export.py
+test_recent_exports.py
+test_ppt_output.*
+gitee_refs.txt
