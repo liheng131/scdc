@@ -10,7 +10,7 @@ pipeline {
             steps {
                 echo '>>> 构建 Docker 镜像...'
                 sh '''
-                    docker compose -f ${COMPOSE_FILE} build --no-cache
+                    docker compose -f ${COMPOSE_FILE} build
                 '''
             }
         }
@@ -50,7 +50,6 @@ pipeline {
                 echo '>>> 拉取 Ollama 模型...'
                 sh '''
                     docker exec scdc_ollama ollama pull nomic-embed-text || true
-                    docker exec scdc_ollama ollama pull qwen3-vl-32b-instruct-gguf || true
                 '''
             }
         }
