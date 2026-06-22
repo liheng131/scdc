@@ -243,8 +243,6 @@ services:
     container_name: scdc_frontend
     ports:
       - "6015:80"  # 宿主机 6015 端口映射到容器 80 端口
-    volumes:
-      - ./docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro  # 挂载 Nginx 配置
     networks:
       - scdc_net
     depends_on:
@@ -260,9 +258,6 @@ services:
     container_name: scdc_prometheus
     ports:
       - "9090:9090"
-    volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prom_data:/prometheus
     networks:
       - scdc_net
     restart: unless-stopped
