@@ -2,7 +2,6 @@ pipeline {
     agent any
 
     environment {
-        PROJECT_DIR = '/opt/scdc'
         COMPOSE_FILE = 'docker-compose.yml'
     }
 
@@ -11,7 +10,7 @@ pipeline {
             steps {
                 echo '>>> 拉取最新代码...'
                 git branch: 'main',
-                    url: 'https://gitee.com/your-username/scdc.git',
+                    url: 'https://gitee.com/liheng-131/scdc.git',
                     credentialsId: 'gitee-credentials'
             }
         }
@@ -20,7 +19,6 @@ pipeline {
             steps {
                 echo '>>> 构建 Docker 镜像...'
                 sh '''
-                    cd ${PROJECT_DIR}
                     docker compose -f ${COMPOSE_FILE} build --no-cache
                 '''
             }
@@ -30,7 +28,6 @@ pipeline {
             steps {
                 echo '>>> 启动/更新所有服务...'
                 sh '''
-                    cd ${PROJECT_DIR}
                     docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
                 '''
             }
@@ -40,7 +37,6 @@ pipeline {
             steps {
                 echo '>>> 等待后端服务就绪...'
                 sh '''
-                    cd ${PROJECT_DIR}
                     for i in $(seq 1 30); do
                         if docker exec scdc_backend python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')" 2>/dev/null; then
                             echo "后端已就绪"
@@ -57,8 +53,7 @@ pipeline {
             steps {
                 echo '>>> 初始化数据库种子数据...'
                 sh '''
-                    cd ${PROJECT_DIR}
-                    docker exec scdc_backend python seed_data.py
+                    docker exec scdc_backend python seed_data.py || true
                 '''
             }
         }
