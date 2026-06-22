@@ -24,7 +24,7 @@ pipeline {
                 '''
                 echo '>>> 启动/更新所有服务...'
                 sh '''
-                    docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
+                    docker compose -f ${COMPOSE_FILE} up -d --remove-orphans || true
                 '''
             }
         }
