@@ -69,7 +69,10 @@ pipeline {
             echo '>>> 部署成功！访问地址: http://120.79.96.231:6015/'
         }
         failure {
-            echo '>>> 部署失败，请检查日志！'
-        }
+            echo '>>> 部署失败，自动打印日志排查...'
+            sh 'docker logs scdc_backend --tail 200 || true'
+            sh 'docker logs scdc_ollama --tail 50 || true'
+            error '部署失败，请根据上方日志修复后重试'
+        }       
     }
 }
