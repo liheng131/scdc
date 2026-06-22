@@ -882,6 +882,72 @@ class ReportImageService:
     # 数据真实性保证: 多种"图"形式以满足 PPT 丰富度
     # ─────────────────────────────────────────────────────
 
+    def generate_matplotlib_chart(
+        self,
+        section_title: str,
+        content: str = "",
+        data_points: Optional[List[Dict[str, Any]]] = None,
+        chart_type: str = "bar",
+    ) -> Optional[Dict[str, str]]:
+        """
+        使用 matplotlib 生成与内容相关的统计图（实例方法，供 reporter 调用）
+
+        Args:
+            section_title: 章节标题（用作图表标题）
+            content: 章节内容（用于提取数据点，如果 data_points 为空）
+            data_points: 数据点列表 [{"label": str, "value": float}, ...]
+            chart_type: 图表类型 ("bar", "line", "pie", "radar")
+
+        Returns:
+            包含 base64 编码图片的字典，失败返回 None
+        """
+        if not data_points:
+            # 尝试从 content 中提取数据点
+            data_points = self._extract_data_from_content(content)
+        if not data_points:
+            # 使用示例数据
+            data_points = self._generate_sample_data(section_title)
+        if not data_points:
+            return None
+
+        try:
+            # 调用模块级 generate_matplotlib_chart 函数
+            _tmp_fd, chart_output_path = tempfile.mkstemp(
+                suffix='.png', prefix='scdc_chart_',
+            )
+            try:
+                os.close(_tmp_fd)
+            except Exception:
+                pass
+
+            chart_path = generate_matplotlib_chart(
+                chart_type=chart_type,
+                data={"title": section_title, "data_points": data_points},
+                output_path=chart_output_path,
+            )
+
+            if chart_path and os.path.exists(chart_path):
+                with open(chart_path, 'rb') as f:
+                    chart_b64 = base64.b64encode(f.read()).decode()
+                os.unlink(chart_path)
+                return {
+                    "title": f"{section_title} - 统计图表",
+                    "base64": chart_b64,
+                    "source": "matplotlib",
+                }
+            else:
+                logger.warning(
+                    f"[MATPLOTLIB] generate_matplotlib_chart returned None for '{section_title}'"
+                )
+                return None
+        except Exception as e:
+            logger.error(
+                f"[MATPLOTLIB] generate_matplotlib_chart failed for '{section_title}': "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            return None
+
     def generate_table_chart(
         self,
         section_title: str,

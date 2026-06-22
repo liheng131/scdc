@@ -101,6 +101,17 @@ class Insight(BaseModel):
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     dimension: str = Field(default="")
 
+
+class NarrativeAngle(BaseModel):
+    """叙述角度：每个分析维度下的多个叙述角度"""
+    dimension: str = Field(default="", description="所属维度名称")
+    angle_title: str = Field(default="", description="角度标题（如'市场规模与增速'、'技术路线演进'）")
+    focus: str = Field(default="", description="聚焦点描述（引导 LLM 生成内容）")
+    suggested_chart_types: List[str] = Field(
+        default_factory=list,
+        description="建议图表类型列表（如 ['bar', 'line']）"
+    )
+
 class AnalyzerInput(BaseModel):
     task_id: str
     topic: str
@@ -120,6 +131,41 @@ class AnalyzerOutput(BaseModel):
     chart_plan: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="图表规划：每个分析维度的图表类型、数据点、位置"
+    )
+    structured_metrics: List["StructuredMetric"] = Field(
+        default_factory=list,
+        description="结构化指标：可绘制统计图的时序数据，如逐年/季度/月度趋势、同比/环比、市场份额等"
+    )
+
+
+# ============================================================
+# 结构化指标数据模型（用于统计图绘制）
+# ============================================================
+
+class MetricDataPoint(BaseModel):
+    """单个数据点：一个 label + 一个 value"""
+    label: str = Field(..., description="数据点标签，如 '2020', 'Q1', '华为'")
+    value: float = Field(..., description="数据点数值")
+
+
+class StructuredMetric(BaseModel):
+    """结构化指标：可绘制统计图的完整时序/对比数据"""
+    metric_name: str = Field(..., description="指标名称，如 '全球AI芯片市场规模'")
+    metric_type: str = Field(
+        default="other",
+        description="指标类型: yearly_trend, quarterly_trend, monthly_trend, "
+                    "yoy_growth, qoq_growth, market_share, other"
+    )
+    unit: str = Field(default="", description="单位，如 '亿美元', '%', '家'")
+    dimension: str = Field(default="", description="所属分析维度，如 '宏观经济环境'")
+    data_points: List[MetricDataPoint] = Field(
+        default_factory=list,
+        description="数据点列表"
+    )
+    source: str = Field(default="", description="数据来源说明")
+    chart_type_hint: str = Field(
+        default="bar",
+        description="建议图表类型: bar, line, pie"
     )
 
 # ============================================================
@@ -156,6 +202,10 @@ class ReporterOutput(BaseModel):
     )
     error: Optional[str] = None
     degraded: bool = False
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="额外元数据，如质量校验结果等",
+    )
 
 # ============================================================
 # Orchestrator（编排）阶段

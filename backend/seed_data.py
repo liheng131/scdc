@@ -86,7 +86,7 @@ async def seed():
                 provider="ollama",
                 model_name="nomic-embed-text",
                 model_type="embedding",
-                base_url="http://localhost:11434",
+                base_url="http://ollama:11434",
                 api_key="",
                 is_default=True,
             )

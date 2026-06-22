@@ -23,7 +23,10 @@ import traceback
 import httpx
 from typing import List, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from app.schemas.agent import AnalyzerInput, AnalyzerOutput, Insight, CleanedItem
+from app.schemas.agent import (
+    AnalyzerInput, AnalyzerOutput, Insight, CleanedItem,
+    StructuredMetric, MetricDataPoint,
+)
 from app.core.config import settings
 from app.core.runtime_config import rumtime_config
 from app.services.embedding import EmbeddingService
@@ -182,6 +185,13 @@ The analysis MUST be structured into the following dimensions (do NOT use any ot
 3. Cross-reference sources where possible - if two sources reinforce the same finding, mention that in the analysis.
 4. Be specific and data-driven. Avoid vague generalities like "the market is growing."
 5. Every dimension listed above MUST have at least one insight. Do not leave any dimension uncovered.
+6. Extract structured metrics from the source materials for chart generation. For each quantifiable finding, output a structured_metrics entry. Focus on:
+   - Yearly trends (e.g., 2020-2025 market size by year)
+   - Quarterly/Monthly breakdowns if available
+   - Year-over-year (YoY) or Quarter-over-Quarter (QoQ) growth rates
+   - Market share distributions (percentages per company/segment)
+   - Regional breakdowns or category comparisons
+   Each structured_metric MUST have: metric_name, metric_type (yearly_trend/quarterly_trend/monthly_trend/yoy_growth/qoq_growth/market_share/other), unit, dimension, data_points (list of objects with label and value fields), source, chart_type_hint (bar/line/pie).
 
 Output strictly as JSON, no markdown:
 {{
@@ -193,6 +203,21 @@ Output strictly as JSON, no markdown:
       "evidence": ["uri1", "uri2"],
       "confidence": 0.92,
       "dimension": "{dimensions[0] if dimensions else ''}"
+    }}
+  ],
+  "structured_metrics": [
+    {{
+      "metric_name": "AI芯片市场规模",
+      "metric_type": "yearly_trend",
+      "unit": "亿美元",
+      "dimension": "{dimensions[0] if dimensions else ''}",
+      "data_points": [
+        {{"label": "2020", "value": 450}},
+        {{"label": "2021", "value": 580}},
+        {{"label": "2022", "value": 720}}
+      ],
+      "source": "source_material_title",
+      "chart_type_hint": "line"
     }}
   ]
 }}
@@ -251,6 +276,114 @@ SOURCE MATERIALS:
             text = text[:-3]
         return text.strip()
 
+    def _parse_structured_metrics(self, raw_metrics: list) -> List[StructuredMetric]:
+        """Parse StructuredMetric objects from raw LLM JSON output"""
+        result: List[StructuredMetric] = []
+        if not raw_metrics or not isinstance(raw_metrics, list):
+            return result
+
+        valid_types = {
+            "yearly_trend", "quarterly_trend", "monthly_trend",
+            "yoy_growth", "qoq_growth", "market_share", "other",
+        }
+        for rm in raw_metrics:
+            if not isinstance(rm, dict):
+                continue
+            data_points = []
+            for dp in rm.get("data_points", []) or []:
+                if not isinstance(dp, dict):
+                    continue
+                try:
+                    data_points.append(MetricDataPoint(
+                        label=str(dp.get("label", "")),
+                        value=float(dp.get("value", 0)),
+                    ))
+                except (ValueError, TypeError):
+                    continue
+
+            if len(data_points) < 2:
+                continue  # 至少需要 2 个数据点才能绘图
+
+            metric_type = str(rm.get("metric_type", "other")).lower()
+            if metric_type not in valid_types:
+                metric_type = "other"
+
+            chart_hint = str(rm.get("chart_type_hint", "bar")).lower()
+            if chart_hint not in ("bar", "line", "pie"):
+                # 自动推断：时序数据用 line，占比用 pie
+                if metric_type in ("market_share",):
+                    chart_hint = "pie"
+                elif metric_type.endswith("_trend"):
+                    chart_hint = "line"
+                else:
+                    chart_hint = "bar"
+
+            result.append(StructuredMetric(
+                metric_name=str(rm.get("metric_name", "未命名指标")),
+                metric_type=metric_type,
+                unit=str(rm.get("unit", "")),
+                dimension=str(rm.get("dimension", "")),
+                data_points=data_points,
+                source=str(rm.get("source", "")),
+                chart_type_hint=chart_hint,
+            ))
+
+        return result
+
+    def _extract_metrics_from_text(self, text: str, dimensions: List[str]) -> List[StructuredMetric]:
+        """Extract numeric values and years from text using regex, generate basic structured metrics (fallback)"""
+        metrics: List[StructuredMetric] = []
+        if not text:
+            return metrics
+
+        # 匹配 年份:数值 模式，如 "2020年: 450亿美元" 或 "2020年达到450亿"
+        year_value_pattern = re.findall(
+            r'(20\d{2})\s*年[^0-9]*?(\d+(?:\.\d+)?)\s*(亿|万|%|美元|亿元|万元)?',
+            text,
+        )
+        if len(year_value_pattern) >= 2:
+            data_points = []
+            unit = ""
+            for y, v, u in year_value_pattern:
+                try:
+                    data_points.append(MetricDataPoint(label=y, value=float(v)))
+                    if u:
+                        unit = u
+                except ValueError:
+                    continue
+            if len(data_points) >= 2:
+                metrics.append(StructuredMetric(
+                    metric_name="年度趋势",
+                    metric_type="yearly_trend",
+                    unit=unit,
+                    dimension=dimensions[0] if dimensions else "",
+                    data_points=data_points,
+                    source="从文本中提取",
+                    chart_type_hint="line",
+                ))
+
+        # 匹配 占比数据，如 "占比35%" 或 "份额60%"
+        share_pattern = re.findall(r'([^\s,，]{2,10})[^0-9]*?(\d+(?:\.\d+)?)\s*%', text)
+        if len(share_pattern) >= 2:
+            data_points = []
+            for name, pct in share_pattern[:8]:
+                try:
+                    data_points.append(MetricDataPoint(label=name.strip(), value=float(pct)))
+                except ValueError:
+                    continue
+            if len(data_points) >= 2:
+                metrics.append(StructuredMetric(
+                    metric_name="市场份额分布",
+                    metric_type="market_share",
+                    unit="%",
+                    dimension=dimensions[-1] if dimensions else "",
+                    data_points=data_points,
+                    source="从文本中提取",
+                    chart_type_hint="pie",
+                ))
+
+        return metrics
+
     def _rule_based_degradation(self, input_data: AnalyzerInput) -> AnalyzerOutput:
         logger.warning(f"LLM unreachable or failed for task '{input_data.task_id}'. Degrading to rule-based analysis.")
         insights = []
@@ -274,6 +407,14 @@ SOURCE MATERIALS:
             ))
 
         combined_summary = f"Analysis Summary for '{input_data.topic}': Found {len(input_data.cleaned_items)} relevant sources including {', '.join(summary_parts[:3])}. {len(input_data.cleaned_items)} key observations were extracted for further review."
+
+        # 从清洗后的文本中提取结构化指标
+        all_text = " ".join(
+            " ".join(item.content_chunks) if item.content_chunks else item.summary
+            for item in input_data.cleaned_items
+        )
+        structured_metrics = self._extract_metrics_from_text(all_text, input_data.dimensions)
+
         return AnalyzerOutput(
             task_id=input_data.task_id,
             success=True,
@@ -283,6 +424,7 @@ SOURCE MATERIALS:
             rag_results_count=0,
             rag_results=[],
             chart_plan=_build_chart_plan(insights),
+            structured_metrics=structured_metrics,
         )
 
     async def execute(self, input_data: AnalyzerInput) -> AnalyzerOutput:
@@ -408,6 +550,13 @@ SOURCE MATERIALS:
                     dimension=dimension
                 ))
 
+            # 解析结构化指标
+            raw_metrics = llm_result.get("structured_metrics", [])
+            structured_metrics = self._parse_structured_metrics(raw_metrics)
+            logger.info(
+                f"Extracted {len(structured_metrics)} structured metrics from LLM for task '{input_data.task_id}'"
+            )
+
             return AnalyzerOutput(
                 task_id=input_data.task_id,
                 success=True,
@@ -416,6 +565,7 @@ SOURCE MATERIALS:
                 rag_results_count=len(rag_results),
                 rag_results=rag_results,
                 chart_plan=_build_chart_plan(validated_insights),
+                structured_metrics=structured_metrics,
             )
         except Exception as e:
             logger.error(f"AnalyzerAgent LLM execution failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")

@@ -27,7 +27,7 @@ import docx
 import docx.shared
 from pptx import Presentation
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -36,6 +36,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.report import Report
 from app.schemas.report import ReportCreate, ReportUpdate, ReportStatisticsItem
 from app.services.ppt_template import PPTTemplateService
+from app.services.report_page_model import (
+    ReportPageModel, PageModel, TextBlock, ImageBlock,
+    USABLE_WIDTH, USABLE_HEIGHT,
+)
 from app.services.embedding import EmbeddingService
 from app.services.vectorstore import VectorStoreService
 
@@ -1173,3 +1177,288 @@ class ReportService:
             raise ValueError("Unsupported format. Use docx, pdf, pptx, or md.")
 
         return result
+
+    # ── 新接口：基于 ReportPageModel 的统一导出 ───────────────
+
+    def generate_docx_from_model(self, model: ReportPageModel) -> bytes:
+        """从 ReportPageModel 生成 DOCX，每页对应一个 Word 页面"""
+        doc = docx.Document()
+
+        # 封面
+        cover_pages = model.get_pages_by_type("cover")
+        if cover_pages:
+            cover = cover_pages[0]
+            doc.add_heading(model.title, 0)
+            subtitle = cover.subtitle or ""
+            if subtitle:
+                doc.add_paragraph(subtitle)
+            doc.add_page_break()
+
+        # 逐页渲染
+        for page in model.pages:
+            if page.page_type == "cover":
+                continue  # 封面已处理
+
+            # 标题
+            title_block = next((tb for tb in page.text_blocks if tb.style == "title"), None)
+            if title_block:
+                doc.add_heading(title_block.text, level=2)
+
+            # 正文
+            body_blocks = [tb for tb in page.text_blocks if tb.style != "title"]
+            for tb in body_blocks:
+                if tb.style == "caption":
+                    p = doc.add_paragraph()
+                    p.style = doc.styles['Normal']
+                    run = p.add_run(tb.text)
+                    run.font.size = docx.shared.Pt(tb.font_size)
+                    run.font.italic = True
+                elif tb.style == "bullet":
+                    p = doc.add_paragraph(tb.text, style='List Bullet')
+                else:
+                    p = doc.add_paragraph(tb.text)
+                    p.style = doc.styles['Normal']
+
+            # 图片
+            for img in page.images:
+                try:
+                    img_data = io.BytesIO(base64.b64decode(img.base64.strip()))
+                    doc.add_picture(img_data, width=docx.shared.Inches(5.5))
+                except Exception as e:
+                    logger.warning("Failed to insert image in DOCX: %s", e)
+
+            doc.add_page_break()
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+
+    def generate_pdf_from_model(self, model: ReportPageModel) -> bytes:
+        """从 ReportPageModel 生成 PDF，每页对应一个 PDF 页面"""
+        from xml.sax.saxutils import escape as _xml_escape
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter,
+                                leftMargin=54, rightMargin=54,
+                                topMargin=54, bottomMargin=54)
+        styles = self._get_cjk_stylesheet()
+        t_style = styles['Title']
+        h2_style = styles['Heading2']
+        body_style = styles['BodyText']
+
+        def _safe_para(text, style):
+            if not text:
+                text = ""
+            escaped = _xml_escape(text)
+            try:
+                return Paragraph(escaped, style)
+            except Exception:
+                return Paragraph(escaped.replace("<", "").replace(">", ""), style)
+
+        story = []
+        tmp_paths: List[str] = []
+
+        # 封面
+        cover_pages = model.get_pages_by_type("cover")
+        if cover_pages:
+            cover = cover_pages[0]
+            story.append(_safe_para(model.title, t_style))
+            story.append(Spacer(1, 20))
+            if cover.subtitle:
+                story.append(_safe_para(cover.subtitle, body_style))
+                story.append(Spacer(1, 15))
+
+        # 逐页渲染
+        for page in model.pages:
+            if page.page_type == "cover":
+                continue
+
+            story.append(Spacer(1, 10))
+
+            # 标题
+            title_block = next((tb for tb in page.text_blocks if tb.style == "title"), None)
+            if title_block:
+                story.append(_safe_para(title_block.text, h2_style))
+                story.append(Spacer(1, 4))
+
+            # 正文
+            body_blocks = [tb for tb in page.text_blocks if tb.style != "title"]
+            for tb in body_blocks:
+                if tb.style == "caption":
+                    story.append(_safe_para(f"[{tb.text}]", body_style))
+                else:
+                    story.append(_safe_para(tb.text, body_style))
+                story.append(Spacer(1, 4))
+
+            # 图片
+            for img in page.images:
+                try:
+                    img_data = io.BytesIO(base64.b64decode(img.base64.strip()))
+                    from PIL import Image as PILImage
+                    img_data.seek(0)
+                    PILImage.open(img_data).verify()
+                    img_data.seek(0)
+
+                    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    tmp.write(img_data.getvalue())
+                    tmp.flush()
+                    tmp_path = tmp.name
+                    tmp.close()
+                    story.append(RLImage(tmp_path, width=450, height=int(450 * 0.6)))
+                    story.append(Spacer(1, 10))
+                    tmp_paths.append(tmp_path)
+                except Exception as e:
+                    logger.warning("Failed to insert image in PDF: %s", e)
+
+            story.append(PageBreak())
+
+        # 移除最后一个多余的 PageBreak
+        if story and isinstance(story[-1], PageBreak):
+            story.pop()
+
+        doc.build(story)
+
+        for tp in tmp_paths:
+            try:
+                os.unlink(tp)
+            except OSError:
+                pass
+
+        buf.seek(0)
+        return buf.getvalue()
+
+    def generate_pptx_from_model(
+        self, model: ReportPageModel, template_id: str = None
+    ) -> bytes:
+        """从 ReportPageModel 生成 PPTX"""
+        try:
+            svc = PPTTemplateService()
+            templates = svc.list_templates()
+            chosen_id = template_id
+            if not chosen_id and templates:
+                chosen_id = templates[0].id
+            if chosen_id and svc.get_template(chosen_id):
+                return svc.fill_template_from_model(chosen_id, model)
+        except Exception as e:
+            logger.warning("PPTTemplateService failed (%s), falling back", e)
+
+        return self._generate_pptx_from_model_fallback(model)
+
+    def _generate_pptx_from_model_fallback(self, model: ReportPageModel) -> bytes:
+        """无模板 PPTX 兜底"""
+        from pptx import Presentation as DefaultPresentation
+        from pptx.util import Pt as PptxPt
+        prs = DefaultPresentation()
+        blank_layout = prs.slide_layouts[6]
+
+        for page in model.pages:
+            slide = prs.slides.add_slide(blank_layout)
+            title_block = next((tb for tb in page.text_blocks if tb.style == "title"), None)
+            if title_block:
+                tx = slide.shapes.add_textbox(
+                    docx.shared.Inches(0.5), docx.shared.Inches(0.3),
+                    docx.shared.Inches(9.0), docx.shared.Inches(0.8),
+                )
+                tf = tx.text_frame
+                p = tf.paragraphs[0]
+                p.text = title_block.text
+                p.font.size = PptxPt(24)
+                p.font.bold = True
+
+            body_blocks = [tb for tb in page.text_blocks if tb.style != "title"]
+            if body_blocks:
+                tx = slide.shapes.add_textbox(
+                    docx.shared.Inches(0.5), docx.shared.Inches(1.5),
+                    docx.shared.Inches(9.0), docx.shared.Inches(5.0),
+                )
+                tf = tx.text_frame
+                tf.word_wrap = True
+                for i, tb in enumerate(body_blocks):
+                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                    p.text = tb.text
+                    p.font.size = PptxPt(tb.font_size)
+
+            if page.images:
+                try:
+                    img = page.images[0]
+                    img_blob = io.BytesIO(base64.b64decode(img.base64.strip()))
+                    slide.shapes.add_picture(
+                        img_blob,
+                        docx.shared.Inches(1), docx.shared.Inches(4.5),
+                        width=docx.shared.Inches(8),
+                    )
+                except Exception:
+                    pass
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+
+    async def export_report_from_model(
+        self,
+        model: ReportPageModel,
+        fmt: str,
+        template_id: Optional[str] = None,
+        report_id: int = 0,
+    ) -> Tuple[str, str, bytes]:
+        """基于 ReportPageModel 的统一导出入口
+
+        Returns:
+            (文件名, MIME类型, 文件二进制内容)
+        """
+        fmt = fmt.lower()
+        if fmt == "docx":
+            data = self.generate_docx_from_model(model)
+            return (f"report_{report_id}.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    data)
+        elif fmt == "pdf":
+            data = self.generate_pdf_from_model(model)
+            return (f"report_{report_id}.pdf", "application/pdf", data)
+        elif fmt == "pptx":
+            data = self.generate_pptx_from_model(model, template_id=template_id)
+            return (f"report_{report_id}.pptx",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    data)
+        elif fmt in ("md", "markdown"):
+            # Markdown 直接从 model 重建
+            md = self._generate_markdown_from_model(model)
+            return (f"report_{report_id}.md", "text/markdown", md.encode("utf-8"))
+        else:
+            raise ValueError("Unsupported format. Use docx, pdf, pptx, or md.")
+
+    def _generate_markdown_from_model(self, model: ReportPageModel) -> str:
+        """从 ReportPageModel 重建 Markdown"""
+        lines = []
+        for page in model.pages:
+            title_block = next((tb for tb in page.text_blocks if tb.style == "title"), None)
+            if title_block:
+                if page.page_type == "cover":
+                    lines.append(f"# {title_block.text}")
+                elif page.page_type == "section":
+                    lines.append(f"## {title_block.text}")
+                elif page.page_type == "content":
+                    lines.append(f"### {title_block.text}")
+                else:
+                    lines.append(f"## {title_block.text}")
+                lines.append("")
+
+            body_blocks = [tb for tb in page.text_blocks if tb.style != "title"]
+            for tb in body_blocks:
+                if tb.style == "bullet":
+                    lines.append(f"- {tb.text}")
+                elif tb.style == "caption":
+                    lines.append(f"> {tb.text}")
+                else:
+                    lines.append(tb.text)
+
+            for img in page.images:
+                lines.append(f"![{img.alt}](data:image/png;base64,{img.base64[:50]}...)")
+
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        return "\n".join(lines)

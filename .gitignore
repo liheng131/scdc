@@ -1,5 +1,4 @@
 # Environments
-# .env
 .venv
 env/
 venv/
@@ -41,6 +40,8 @@ MANIFEST
 .agents/
 .gemini/
 .trae/
+.superpowers/
+docs/
 
 # IDE
 .idea/

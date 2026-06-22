@@ -123,7 +123,7 @@ class OrchestratorAgent:
                     "detail": {
                         "keywords": list(col_out.expanded_keywords or []),
                         "items": [
-                            {"title": it.title, "source_uri": it.source_uri, "snippet": (it.snippet or it.summary or "")[:200]}
+                            {"title": it.title, "source_uri": it.source_uri, "snippet": (it.content or "")[:200]}
                             for it in col_out.items[:30]
                         ],
                     },

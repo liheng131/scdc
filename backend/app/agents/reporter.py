@@ -29,6 +29,9 @@ from app.schemas.agent import ReporterInput, ReporterOutput, ReportSection, Insi
 from app.core.config import settings
 from app.core.runtime_config import rumtime_config
 from app.services.report_image import ReportImageService
+from app.services.report_page_model import ReportPageModel
+from app.services.markdown_parser import MarkdownPageParser
+from app.services.quality_validator import QualityValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -659,38 +662,30 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         chart_configs = [c for c in chart_configs if c]
         chart_titles = [t for t in chart_titles if t]
 
-        # 5) 在文末追加图表清单
-        if chart_titles:
-            chart_list_md = "\n\n---\n\n## 📊 图表清单 (Chart Index)\n\n"
-            for i, title in enumerate(chart_titles, 1):
-                chart_list_md += f"- **图表 {i}** <a id=\"chart-{i}\"></a>: {title}\n"
-                chart_list_md += f"  - 类型: {chart_configs[i-1].get('type', 'bar')}\n"
-                chart_list_md += f"  - 配置: `chart_configs[{i-1}]`\n"
-            new_md = new_md + chart_list_md
-
-        # 6) 300 字不包含图表引用的兜底(用最终图引用计数)
-        # 计算最长的无引用段(粗略)
+        # 5) 300 字不包含图表引用的兜底
+        # 检查段落是否已包含图表引用（[图表:...] 或 base64 内嵌图片 ![...](data:image/...)）
         try:
-            # 简单地按段落/换行分割
             segments = re.split(r'(\n\n+)', new_md)
             current_no_chart_len = 0
             patched_segments: List[str] = []
             for seg in segments:
                 if not seg:
                     continue
-                if "[图表:" in seg:
+                # 检查是否已有图表引用：[图表:...] 或 base64 内嵌图片
+                has_chart_ref = bool(re.search(r'\[图表:[^\]]+\]\([^)]+\)', seg))
+                has_inline_img = bool(re.search(r'!\[[^\]]*\]\(data:image/', seg))
+                if has_chart_ref or has_inline_img:
                     current_no_chart_len = 0
                     patched_segments.append(seg)
                     continue
-                # 段内如果出现 [图表: 即重置
+                # 移除图表引用后计算纯文本长度
                 seg_no_chart = re.sub(r'\[图表:[^\]]+\]\([^)]+\)', '', seg)
+                seg_no_chart = re.sub(r'!\[[^\]]*\]\(data:image/[^)]+\)', '', seg_no_chart)
                 if len(seg_no_chart) > 300 and current_no_chart_len + len(seg_no_chart) > 300:
                     # 在段尾追加一个默认图表引用(选第一个 chart_config)
                     if chart_configs:
-                        fallback = chart_configs[0]
                         title = chart_titles[0] if chart_titles else "图表"
-                        idx = 1
-                        seg = seg.rstrip() + f" [图表: {title}](#chart-{idx})"
+                        seg = seg.rstrip() + f" [图表: {title}](#chart-1)"
                     current_no_chart_len = 0
                 else:
                     current_no_chart_len += len(seg_no_chart)
@@ -753,26 +748,28 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         insights: List[Insight],
         dimensions: List[str],
         data_points_by_section: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        structured_metrics: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         为每个分析维度生成配图
 
         数据真实性策略:
-        1. **优先用 LLM 提供的数据点**（从 markdown 中解析的 **数据点** 块）画统计图
-        2. 如果 LLM 没有给出数据点 → AI 图片生成（ComfyUI）
-        3. AI 失败 → 用 LLM 数据点或 sample data 画 matplotlib 统计图
-        4. matplotlib 失败 → 关键词卡片（无虚假数字）
-        5. 关键词卡片失败 → 占位图
+        1. **优先用 AnalyzerAgent 提取的结构化指标** (structured_metrics) 画统计图
+        2. 如果 structured_metrics 为空 → 用 LLM 报告中的数据点 (data_points_by_section)
+        3. 如果也没有 → AI 图片生成（ComfyUI）
+        4. AI 失败 → 用 sample data 画 matplotlib 统计图
+        5. matplotlib 失败 → 关键词卡片（无虚假数字）
+        6. 关键词卡片失败 → 占位图
 
         Args:
             topic: 报告主题
             insights: 分析洞察列表
             dimensions: 分析维度列表
-            data_points_by_section: LLM 在报告中显式给出的数据点,
-                格式: {section_name: [{"label": str, "value": float, "unit": str}, ...]}
+            data_points_by_section: LLM 在报告中显式给出的数据点
+            structured_metrics: AnalyzerAgent 提取的结构化指标（优先级最高）
 
         Returns:
-            配图数据列表，格式: [{"section": str, "title": str, "base64": str, "position": int}]
+            配图数据列表
         """
         if not insights or not dimensions:
             return []
@@ -812,9 +809,63 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             # 取出该维度的真实数据点（来自 LLM 报告）
             real_data_points = data_points_by_section.get(dim) or []
 
-            # ─── 策略 1: 优先用真实数据点画统计图（保证数据真实性）───
+            # ─── 策略 0: 优先用 AnalyzerAgent 结构化指标（最高优先级）───
             chart_generated = False
-            if len(real_data_points) >= 3:
+            if structured_metrics:
+                # 按维度匹配结构化指标
+                dim_metrics = [
+                    m for m in structured_metrics
+                    if m.dimension and m.dimension.strip() == dim.strip()
+                ]
+                if not dim_metrics:
+                    # 维度名不匹配时，尝试模糊匹配
+                    dim_lower = dim.lower()
+                    dim_metrics = [
+                        m for m in structured_metrics
+                        if m.dimension and (
+                            m.dimension.lower() in dim_lower or dim_lower in m.dimension.lower()
+                        )
+                    ]
+
+                for metric in dim_metrics[:2]:  # 每个维度最多 2 张图
+                    if len(metric.data_points) < 2:
+                        continue
+                    try:
+                        chart_type = metric.chart_type_hint
+                        if chart_type not in ("bar", "line", "pie"):
+                            chart_type = "bar"
+                        chart_result = self.image_service.generate_matplotlib_chart(
+                            section_title=metric.metric_name,
+                            content="",
+                            data_points=[
+                                {"label": dp.label, "value": dp.value}
+                                for dp in metric.data_points
+                            ],
+                            chart_type=chart_type,
+                        )
+                        if chart_result:
+                            illustrations.append({
+                                "section": dim,
+                                "title": chart_result["title"],
+                                "base64": chart_result["base64"],
+                                "position": position_counter,
+                                "source": "structured_metric",
+                            })
+                            position_counter += 1
+                            successful_dimensions.add(dim)
+                            chart_generated = True
+                            logger.info(
+                                f"[STRUCTURED-METRIC] Chart for '{dim}': "
+                                f"'{metric.metric_name}' ({len(metric.data_points)} pts)"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"Structured metric chart failed for '{dim}': "
+                            f"{type(e).__name__}: {e}",
+                        )
+
+            # ─── 策略 1: 用真实数据点画统计图（来自 LLM 报告）───
+            if not chart_generated and len(real_data_points) >= 3:
                 try:
                     chart_result = self.image_service.generate_matplotlib_chart(
                         section_title=dim,
@@ -1304,6 +1355,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                             insights=insights,
                             dimensions=dimensions if dimensions else DEFAULT_DIMENSIONS,
                             data_points_by_section=data_points_by_section,
+                            structured_metrics=input_data.analyzer_output.structured_metrics,
                         )
                         if dimension_illustrations:
                             full_markdown = self._embed_illustrations_in_markdown(
@@ -1361,6 +1413,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 insights=insights,
                 dimensions=dimensions,
                 data_points_by_section=data_points_by_section,
+                structured_metrics=input_data.analyzer_output.structured_metrics,
             )
             if dimension_illustrations:
                 full_markdown = self._embed_illustrations_in_markdown(
@@ -1389,3 +1442,91 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             dimension_illustrations=dimension_illustrations,
             degraded=True,
         )
+
+    async def execute_with_quality(
+        self,
+        input_data: ReporterInput,
+        template_id: Optional[str] = None,
+    ) -> Tuple[ReporterOutput, Optional[ReportPageModel], Optional[ValidationResult]]:
+        """执行报告生成 + 质量校验 + 统一页面模型构建
+
+        在现有 execute() 基础上增加：
+        1. Markdown → ReportPageModel 转换
+        2. QualityValidator 校验 + 自动修复
+        3. 返回修复后的 ReportPageModel（供多格式导出使用）
+
+        Returns:
+            (ReporterOutput, ReportPageModel | None, ValidationResult | None)
+        """
+        # 1. 执行现有报告生成逻辑
+        output = await self.execute(input_data)
+        if not output.success or not output.markdown_report:
+            return output, None, None
+
+        try:
+            # 2. Markdown → ReportPageModel
+            parser = MarkdownPageParser()
+            chart_images = output.chart_images or []
+            # 合并 dimension_illustrations 到 chart_images
+            if output.dimension_illustrations:
+                chart_images = list(chart_images) + list(output.dimension_illustrations)
+
+            model = parser.parse(
+                markdown=output.markdown_report,
+                title=input_data.topic,
+                chart_images=chart_images,
+                metadata={
+                    "task_id": input_data.task_id,
+                    "dimensions": input_data.dimensions or list(DEFAULT_DIMENSIONS),
+                    "degraded": output.degraded,
+                },
+            )
+
+            logger.info(
+                "ReportPageModel built: %d pages for task '%s'",
+                model.page_count, input_data.task_id,
+            )
+
+            # 3. 质量校验 + 自动修复
+            validator = QualityValidator()
+            validation = validator.validate(model)
+
+            if validation.fixes_applied:
+                logger.info(
+                    "QualityValidator applied %d fixes for task '%s': %s",
+                    len(validation.fixes_applied), input_data.task_id,
+                    validation.fixes_applied,
+                )
+            if validation.errors:
+                logger.warning(
+                    "QualityValidator found %d errors for task '%s': %s",
+                    len(validation.errors), input_data.task_id,
+                    validation.errors,
+                )
+            if validation.warnings:
+                logger.info(
+                    "QualityValidator %d warnings for task '%s'",
+                    len(validation.warnings), input_data.task_id,
+                )
+
+            # 4. 将校验结果信息附加到输出
+            final_model = validation.fixed_model or model
+            output.metadata = output.metadata or {}
+            output.metadata["quality_validation"] = {
+                "passed": validation.passed,
+                "errors": len(validation.errors),
+                "warnings": len(validation.warnings),
+                "fixes": len(validation.fixes_applied),
+                "fixes_detail": validation.fixes_applied,
+                "page_count": final_model.page_count,
+            }
+
+            return output, final_model, validation
+
+        except Exception as e:
+            logger.error(
+                "Quality pipeline failed for task '%s': %s. "
+                "Falling back to original output.",
+                input_data.task_id, e, exc_info=True,
+            )
+            return output, None, None

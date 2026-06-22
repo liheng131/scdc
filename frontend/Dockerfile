@@ -9,7 +9,8 @@ FROM node:20-alpine as builder
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install -g pnpm && pnpm install
+# 使用淘宝 npm 镜像加速
+RUN npm config set registry https://registry.npmmirror.com && npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install
 
 COPY . .
 RUN pnpm build
