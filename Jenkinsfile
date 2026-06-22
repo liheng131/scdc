@@ -6,15 +6,6 @@ pipeline {
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                echo '>>> 拉取最新代码...'
-                git branch: 'main',
-                    url: 'https://gitee.com/liheng-131/scdc.git',
-                    credentialsId: 'gitee-credentials'
-            }
-        }
-
         stage('Build Images') {
             steps {
                 echo '>>> 构建 Docker 镜像...'
