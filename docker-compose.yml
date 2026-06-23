@@ -243,9 +243,6 @@ services:
     container_name: scdc_frontend
     ports:
       - "6015:80"  # 宿主机 6015 端口映射到容器 80 端口
-    volumes:  
-      - ./docker/nginx:/etc/nginx/conf.d:ro
-      - ./docker/frontend/dist:/usr/share/nginx/html
     networks:
       - scdc_net
     depends_on:
