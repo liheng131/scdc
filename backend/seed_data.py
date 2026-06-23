@@ -18,7 +18,7 @@ import os
 # 确保可以导入 app 模块
 sys.path.insert(0, os.path.dirname(__file__))
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -58,60 +58,43 @@ async def seed():
         else:
             print("[--] 管理员账号已存在，跳过")
 
-        # 2. AI 模型配置
-        # LLM 模型 (gpustack)
-        existing_llm = await session.execute(
-            select(AiModelConfig).where(AiModelConfig.model_type == "llm", AiModelConfig.is_default == True)
-        )
-        if not existing_llm.scalar_one_or_none():
-            llm_config = AiModelConfig(
+        # 2. AI 模型配置 — 先清空再插入，确保每次部署都是最新配置
+        from app.core.security import encrypt_api_key
+        await session.execute(text("DELETE FROM ai_model_configs"))
+        print("[OK] 已清空 ai_model_configs 表")
+
+        api_key = "gpustack_8bbcf8bfb8db1e90_f208fce3866f9aa43e912cc816ef92a8"
+        encrypted_key = encrypt_api_key(api_key)
+
+        configs = [
+            AiModelConfig(
                 provider="gpustack",
                 model_name="qwen3-vl-32b-instruct-gguf",
                 model_type="llm",
                 base_url="http://120.79.96.231:6003",
-                api_key="",
+                api_key=encrypted_key,
                 is_default=True,
-            )
-            session.add(llm_config)
-            print("[OK] 创建默认 LLM 模型配置: gpustack / qwen3-vl-32b-instruct-gguf")
-        else:
-            print("[--] 默认 LLM 模型配置已存在，跳过")
-
-        # Embedding 模型
-        existing_emb = await session.execute(
-            select(AiModelConfig).where(AiModelConfig.model_type == "embedding", AiModelConfig.is_default == True)
-        )
-        if not existing_emb.scalar_one_or_none():
-            emb_config = AiModelConfig(
+            ),
+            AiModelConfig(
                 provider="ollama",
                 model_name="nomic-embed-text",
                 model_type="embedding",
-                base_url="http://localhost:11434",
+                base_url="http://ollama:11434",
                 api_key="",
                 is_default=True,
-            )
-            session.add(emb_config)
-            print("[OK] 创建默认 Embedding 模型配置: ollama / nomic-embed-text")
-        else:
-            print("[--] 默认 Embedding 模型配置已存在，跳过")
-
-        # Rerank 模型 (gpustack)
-        existing_rerank = await session.execute(
-            select(AiModelConfig).where(AiModelConfig.model_type == "rerank", AiModelConfig.is_default == True)
-        )
-        if not existing_rerank.scalar_one_or_none():
-            rerank_config = AiModelConfig(
+            ),
+            AiModelConfig(
                 provider="gpustack",
                 model_name="lb-reranker-0.5b-v1.0-gguf",
                 model_type="rerank",
                 base_url="http://120.79.96.231:6003",
-                api_key="",
+                api_key=encrypted_key,
                 is_default=True,
-            )
-            session.add(rerank_config)
-            print("[OK] 创建默认 Rerank 模型配置: gpustack / lb-reranker-0.5b-v1.0-gguf")
-        else:
-            print("[--] 默认 Rerank 模型配置已存在，跳过")
+            ),
+        ]
+        for cfg in configs:
+            session.add(cfg)
+        print(f"[OK] 已插入 {len(configs)} 条模型配置: LLM / Embedding / Rerank")
 
         # 3. 通知规则（邮件推送）
         existing_rules = await session.execute(
