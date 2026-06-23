@@ -17,14 +17,9 @@ pipeline {
 
         stage('Deploy Services') {
             steps {
-                echo '>>> 清理可能错误创建的挂载目录...'
+                echo '>>> 强制重建并启动所有服务（每次都使用最新镜像和环境变量）...'
                 sh '''
-                    find . -path '*/docker/prometheus/prometheus.yml' -type d -exec rm -rf {} + 2>/dev/null || true
-                    find . -path '*/docker/nginx/nginx.conf' -type d -exec rm -rf {} + 2>/dev/null || true
-                '''
-                echo '>>> 启动/更新所有服务...'
-                sh '''
-                    docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
+                    docker compose -f ${COMPOSE_FILE} up -d --force-recreate --remove-orphans
                 '''
             }
         }
@@ -82,6 +77,6 @@ pipeline {
             sh 'docker logs scdc_backend --tail 200 || true'
             sh 'docker logs scdc_ollama --tail 50 || true'
             error '部署失败，请根据上方日志修复后重试'
-        }       
+        }
     }
 }
