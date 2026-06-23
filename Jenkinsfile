@@ -75,7 +75,9 @@ pipeline {
         failure {
             echo '>>> 部署失败，自动打印日志排查...'
             sh 'docker logs scdc_backend --tail 200 || true'
+            sh 'docker logs scdc_frontend --tail 200 || true'
             sh 'docker logs scdc_ollama --tail 50 || true'
+            sh 'docker ps -a || true'
             error '部署失败，请根据上方日志修复后重试'
         }
     }

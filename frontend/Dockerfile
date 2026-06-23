@@ -22,10 +22,11 @@ FROM nginx:1.25-alpine
 # 将构建产物复制到 Nginx 默认目录
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# 将 Nginx 反向代理配置嵌入镜像（避免 Jenkins workspace bind mount 路径问题）
+# 将 Nginx 配置嵌入镜像（直接从构建上下文复制）
+# 这样避免了 bind mount 路径问题，部署更稳定
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# 复制自定义入口脚本（跳过 IPv6 自动配置，避免只读文件系统警告）
+# 复制自定义入口脚本（禁用 IPv6 自动配置，避免只读文件系统警告）
 COPY entrypoint.sh /docker-entrypoint.d/99-custom-entrypoint.sh
 RUN chmod +x /docker-entrypoint.d/99-custom-entrypoint.sh
 
