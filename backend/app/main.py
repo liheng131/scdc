@@ -122,9 +122,9 @@ async def lifespan(app: FastAPI):
 
             # 按类型分别检查并补全，确保三种模型配置都存在
             model_defaults = [
-                ("llm", provider, model_name, base_url, encrypted_key),
+                ("llm", provider, model_name, "http://120.79.96.231:6003", "gpustack_8bbcf8bfb8db1e90_f208fce3866f9aa43e912cc816ef92a8"),
                 ("embedding", "ollama", embedding_model, base_url, ""),
-                ("rerank", provider, "bge-reranker-v2-m3", base_url, encrypted_key),
+                ("rerank", provider, "bge-reranker-v2-m3", "http://120.79.96.231:6003", "gpustack_8bbcf8bfb8db1e90_f208fce3866f9aa43e912cc816ef92a8"),
             ]
             for mtype, mprovider, mname, murl, mkey in model_defaults:
                 exist = await conn.execute(
