@@ -96,10 +96,14 @@ class MarkdownPageParser:
         # 3. 构建章节配图索引
         section_chart_index = self._build_chart_index(chart_images or [])
 
-        # 4. 每个章节
+        # 4. 每个章节（跳过总结类章节，其内容由 make_summary_page 统一处理）
         for sec_idx, section in enumerate(sections, start=1):
             sec_title = section["title"]
             sec_content = section["content"]
+
+            # 跳过总结/建议/展望类章节，避免与后面的 summary 页重复
+            if self._is_summary_section(sec_title):
+                continue
 
             # 4.1 章节封面
             pages.append(make_section_page(sec_title, sec_idx))
@@ -129,7 +133,7 @@ class MarkdownPageParser:
                         sec_charts.append(chart)
 
             # 4.4 合并所有图片（全局去重：同一 base64 无论来源只保留一次）
-            seen_b64: set = set()
+            seen_b64.clear()
             all_images: List[ImageBlock] = []
             for img in inline_images:
                 if img.base64 and img.base64 not in seen_b64:
@@ -455,6 +459,12 @@ class MarkdownPageParser:
         return blocks
 
     # ── 内部：辅助 ──
+
+    @staticmethod
+    def _is_summary_section(title: str) -> bool:
+        """判断章节标题是否为总结/建议/展望类"""
+        title_lower = title.lower()
+        return any(kw in title_lower for kw in ["总结", "建议", "展望", "conclusion"])
 
     def _extract_subtitle(self, markdown: str) -> str:
         """从 Markdown 中提取副标题/日期"""

@@ -32,6 +32,8 @@ interface ChatMessage {
   stageHint?: string;
   chartOptions?: any[];
   reportMarkdown?: string;
+  /** 报告 ID，用于 iframe 预览和导出（SSE completed 事件中后端返回） */
+  reportId?: number;
   stageStats?: { label: string; before: number; after?: number; icon: string }[];
   degraded?: boolean;
   partialStats?: { label: string; count: string; icon: string }[];
@@ -399,6 +401,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
       }
     });
 
+    es.addEventListener('stage_progress', (e: any) => {
+      resetTimeout(convId);
+      const data = JSON.parse(e.data);
+      if (activeConvIdForStream.value && activeAssistantIdxForStream.value >= 0) {
+        updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
+          stageHint: `${data.message}`,
+        });
+      }
+    });
+
     es.addEventListener('stage_complete', (e: any) => {
       resetTimeout(convId);
       const data = JSON.parse(e.data);
@@ -552,6 +564,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
         updateMessage(activeConvIdForStream.value, activeAssistantIdxForStream.value, {
           content,
           reportMarkdown: md,
+          reportId: data.report_id || undefined,
           chartOptions: data.chart_configs || [],
           stageHint: '',
           stageStats,
@@ -728,6 +741,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
               role: 'assistant',
               content,
               reportMarkdown: md,
+              reportId: item.result?.report_id || undefined,
               chartOptions: item.result.chart_configs || [],
               // 把后端持久化的 stageDetails 挂到 assistant 消息上,
               // 这样 handleStageDetail 才能从 messages 中读到 stages 详情

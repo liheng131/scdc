@@ -614,7 +614,7 @@ body {{ background: var(--bg); }}
         return self._wrap_slide(page, idx, total, body, extra_class="center tc")
 
     def _render_content(self, page: HTMLPageModel, idx: int, total: int) -> str:
-        """通用内容页：左文 + 右图 或 上文 + 下图"""
+        """通用内容页：左文 + 右图/图表 或 上文 + 下图/表格"""
         title = self._esc(page.title)
         kicker = self._esc(page.kicker or "Analysis")
 
@@ -634,6 +634,40 @@ body {{ background: var(--bg); }}
         <div class="caption">{self._esc(img.caption)}</div>
       </div>'''
 
+        # Chart.js 图表（当 chart_data 存在时）
+        chart_html = ""
+        if page.chart_data:
+            chart_id = f"content_chart_{idx}"
+            labels = page.chart_data.get("labels", [])
+            datasets_cfg = page.chart_data.get("datasets", [])
+            labels_js = ",".join("'" + self._esc(str(l)) + "'" for l in labels)
+            datasets_js_parts = []
+            for ds in datasets_cfg:
+                data_str = ",".join(str(v) for v in ds.get("data", []))
+                label_esc = self._esc(ds.get("label", ""))
+                datasets_js_parts.append(
+                    "{label:'" + label_esc + "',data:[" + data_str + "],backgroundColor:accent,borderRadius:6}"
+                )
+            datasets_js = ",".join(datasets_js_parts)
+            chart_script = (
+                "addEventListener('DOMContentLoaded',()=>{"
+                "const css=getComputedStyle(document.documentElement);"
+                "const accent=css.getPropertyValue('--accent').trim();"
+                "const text2=css.getPropertyValue('--text-2').trim();"
+                "const border=css.getPropertyValue('--border').trim();"
+                "new Chart(document.getElementById('" + chart_id + "'),{type:'bar',"
+                "data:{labels:[" + labels_js + "],"
+                "datasets:[" + datasets_js + "]},"
+                "options:{plugins:{legend:{labels:{color:text2}}}"
+                ",scales:{x:{ticks:{color:text2},grid:{color:border}}"
+                ",y:{ticks:{color:text2},grid:{color:border}}}}});"
+                "});"
+            )
+            chart_html = f'''<div class="card anim-fade-right" data-anim="fade-right" style="height:320px;padding:20px">
+        <canvas id="{chart_id}"></canvas>
+      </div>
+      <script>{chart_script}</script>'''
+
         # 表格
         table_html = ""
         if page.table_data:
@@ -651,8 +685,10 @@ body {{ background: var(--bg); }}
         </table>
       </div>'''
 
-        if image_html and text_html:
-            # 左文右图
+        visual_html = image_html or chart_html
+
+        if visual_html and text_html:
+            # 左文 + 右图/图表
             body = f'''<p class="kicker">{kicker}</p>
   <h2 class="h2">{title}</h2>
   <div class="grid g2 mt-l" style="align-items:start">
@@ -660,7 +696,7 @@ body {{ background: var(--bg); }}
       {text_html}
     </div>
     <div class="stack">
-      {image_html}
+      {visual_html}
     </div>
   </div>
   {table_html}
@@ -680,11 +716,11 @@ body {{ background: var(--bg); }}
     <span class="dim2">分析</span>
     <span class="slide-number" data-current="{idx + 1}" data-total="{total}"></span>
   </div>'''
-        elif image_html and not text_html:
-            # 大图为主
+        elif visual_html and not text_html:
+            # 大图/图表为主
             body = f'''<p class="kicker">{kicker}</p>
   <h2 class="h2">{title}</h2>
-  {image_html}
+  {visual_html}
   <div class="deck-footer">
     <span class="dim2">可视化</span>
     <span class="slide-number" data-current="{idx + 1}" data-total="{total}"></span>

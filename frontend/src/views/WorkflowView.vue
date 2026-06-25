@@ -738,7 +738,7 @@ const handleExportReport = async (markdown: string, fmt: string, template_id?: s
     }
   }
 
-  const exportUrl = reportsApi.exportReportUrl(reportId, fmt, template_id);
+  const exportUrl = reportsApi.exportReportUrl(reportId, fmt, template_id, true, selectedTheme.value);
   try {
     const response = await fetch(exportUrl, {
       headers: reportsApi.getExportHeaders(),
@@ -786,6 +786,120 @@ const handleCopyReport = (markdown: string) => {
     ElMessage.error('复制失败');
   });
 };
+
+// 报告预览相关
+const previewReportIds = ref<Record<number, number>>({});
+const previewBlobUrls = ref<Record<number, string>>({});
+
+// html-ppt 主题切换器（Phase 1）
+// 36 套主题，与后端 HTMLReportGenerator.available_themes 对齐
+const HTML_PPT_THEMES = [
+  'minimal-white', 'tokyo-night', 'dracula', 'aurora', 'cyberpunk-neon',
+  'bauhaus', 'blueprint', 'catppuccin-mocha', 'corporate-clean', 'editorial-serif',
+  'glassmorphism', 'gruvbox-dark', 'japanese-minimal', 'magazine-bold', 'memphis-pop',
+  'midcentury', 'neo-brutalism', 'news-broadcast', 'nord', 'pitch-deck-vc',
+  'rainbow-gradient', 'retro-tv', 'rose-pine', 'sharp-mono', 'soft-pastel',
+  'solarized-light', 'sunset-warm', 'swiss-grid', 'terminal-green', 'vaporwave',
+  'xiaohongshu-white', 'y2k-chrome', 'academic-paper', 'arctic-cool', 'catppuccin-latte',
+  'engineering-whiteprint',
+];
+// 从 localStorage 读用户上次选的主题
+const selectedTheme = ref<string>(localStorage.getItem('html_ppt_theme') || 'minimal-white');
+// 记录每个消息的当前主题，用于 force re-render
+const themeByMessage = ref<Record<number, string>>({});
+
+function changeTheme(idx: number, theme: string) {
+  selectedTheme.value = theme;
+  localStorage.setItem('html_ppt_theme', theme);
+  themeByMessage.value[idx] = theme;
+  // 直接构建新 URL，无需 blob URL
+  const reportId = previewReportIds.value[idx] || reportIdCache.value[workflowStore.activeConversation?.id || ''];
+  if (reportId) {
+    const token = localStorage.getItem('token') || '';
+    const base = import.meta.env.VITE_API_BASE_URL || '';
+    previewBlobUrls.value[idx] = `${base}/api/v1/reports/${reportId}/preview?theme=${encodeURIComponent(theme)}&token=${encodeURIComponent(token)}`;
+  }
+}
+
+async function openPresenterMode(idx: number) {
+  const reportId = previewReportIds.value[idx] || reportIdCache.value[workflowStore.activeConversation?.id || ''];
+  if (!reportId) {
+    ElMessage.warning('报告未加载，无法打开演讲者模式');
+    return;
+  }
+  const token = localStorage.getItem('token') || '';
+  const base = import.meta.env.VITE_API_BASE_URL || '';
+  const theme = themeByMessage[idx] || selectedTheme.value;
+  const url = `${base}/api/v1/reports/${reportId}/preview?theme=${encodeURIComponent(theme)}&token=${encodeURIComponent(token)}`;
+  window.open(url, '_blank', 'width=1920,height=1080');
+}
+
+/** 加载报告预览（自动调用，无需用户点击） */
+const loadPreview = async (msgIndex: number, msg: any) => {
+  if (previewBlobUrls.value[msgIndex]) return; // 已加载
+  if (!msg.reportMarkdown) return;
+  const wfId = workflowStore.activeConversation?.id
+    || workflowStore.activeConversation?.serverWorkflowId;
+  if (!wfId) return;
+
+  let reportId = msg.reportId || previewReportIds.value[msgIndex];
+  if (!reportId) {
+    reportId = reportIdCache.value[wfId];
+  }
+  if (!reportId) {
+    try {
+      const res = await reportsApi.getReports({ task_id: wfId });
+      if (res.data && res.data.length > 0) {
+        reportId = res.data[0].id;
+        reportIdCache.value[wfId] = reportId;
+        previewReportIds.value[msgIndex] = reportId;
+      }
+    } catch { /* ignore */ }
+  }
+  if (!reportId && msg.reportMarkdown) {
+    try {
+      const res = await reportsApi.createFromWorkflow({
+        task_id: wfId,
+        title: workflowStore.activeConversation?.topic || 'Untitled',
+        content_markdown: msg.reportMarkdown,
+        summary: msg.reportMarkdown.substring(0, 200),
+      });
+      reportId = res.data.id;
+      reportIdCache.value[wfId] = reportId;
+      previewReportIds.value[msgIndex] = reportId;
+    } catch { return; }
+  }
+  if (!reportId) return;
+
+  // 使用 token 查询参数直接加载 iframe，避免 blob URL 导致的静态资源加载失败问题
+  const token = localStorage.getItem('token') || '';
+  const base = import.meta.env.VITE_API_BASE_URL || '';
+  const theme = themeByMessage[msgIndex] || selectedTheme.value;
+  const directUrl = `${base}/api/v1/reports/${reportId}/preview?theme=${encodeURIComponent(theme)}&token=${encodeURIComponent(token)}`;
+  previewBlobUrls.value[msgIndex] = directUrl;
+};
+
+// 监听消息变化，自动为报告消息加载预览
+watch(
+  () => workflowStore.activeConversation?.messages,
+  (msgs) => {
+    if (!msgs) return;
+    // 切换对话时清空旧的预览 URLs（索引会重新从 0 开始）
+    const currentKeys = new Set(msgs.map((_: any, i: number) => i));
+    for (const key of Object.keys(previewBlobUrls.value)) {
+      if (!currentKeys.has(Number(key))) {
+        delete previewBlobUrls.value[Number(key)];
+        delete previewReportIds.value[Number(key)];
+      }
+    }
+    msgs.forEach((msg: any, idx: number) => {
+      if (msg.reportMarkdown && !previewBlobUrls.value[idx]) {
+        loadPreview(idx, msg);
+      }
+    });
+  },
+  { deep: true, immediate: true }
+);
 
 const renderChartsForMessages = (msgs: any[]) => {
   msgs.forEach((msg, msgIdx) => {
@@ -982,8 +1096,31 @@ const formatTime = (ts: number) => {
                   <span class="partial-stat-text">{{ stat.label }}：{{ stat.count }}</span>
                 </div>
               </div>
+              <!-- 报告消息：用 iframe 展示 html-ppt 风格报告（所见即所得） -->
               <div
-                v-if="msg.content"
+                v-if="msg.reportMarkdown && !(loading && idx === messages.length - 1) && previewBlobUrls[idx]"
+                class="report-iframe-wrapper"
+              >
+                <div class="report-toolbar">
+                  <el-select
+                    :model-value="themeByMessage[idx] || selectedTheme"
+                    @update:model-value="(v: string) => changeTheme(idx, v)"
+                    size="small"
+                    style="width: 200px"
+                    filterable
+                    placeholder="选择主题"
+                  >
+                    <el-option v-for="t in HTML_PPT_THEMES" :key="t" :label="t" :value="t" />
+                  </el-select>
+                  <el-button size="small" text @click="openPresenterMode(idx)" title="打开演讲者模式（html-ppt 的 S 键同步）">
+                    🎤 演讲者模式
+                  </el-button>
+                </div>
+                <iframe :src="previewBlobUrls[idx]" class="report-iframe" sandbox="allow-scripts allow-same-origin"></iframe>
+              </div>
+              <!-- 非报告消息 / 报告尚未加载完成：显示原始内容 -->
+              <div
+                v-else-if="msg.content"
                 class="message-content assistant-content report-body"
                 v-html="msg.content"
               ></div>
@@ -2175,4 +2312,29 @@ const formatTime = (ts: number) => {
   color: var(--scdc-ink-soft, #909399);
   letter-spacing: 0.02em;
 }
+/* ===== Report iframe (html-ppt 所见即所得) ===== */
+.report-iframe-wrapper {
+  margin-top: 16px;
+  border: 1px solid var(--scdc-border-color);
+  border-radius: var(--scdc-radius-md);
+  overflow: hidden;
+  background: #fff;
+}
+
+.report-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f7f7fa;
+  border-bottom: 1px solid var(--scdc-border-color);
+}
+
+.report-iframe {
+  width: 100%;
+  height: 800px;
+  border: none;
+  display: block;
+}
+
 </style>

@@ -38,18 +38,30 @@ class CreateFromWorkflowRequest(BaseModel):
     summary: Optional[str] = None
     chart_images: Optional[List[Dict[str, Any]]] = None
     dimension_illustrations: Optional[List[Dict[str, Any]]] = None
+    # html-ppt Phase 1
+    page_model: Optional[List[Dict[str, Any]]] = None
+    theme: Optional[str] = None
+    notes_summary: Optional[str] = None
 
-@router.post("/", response_model=ResponseModel)
+@router.post("", response_model=ResponseModel)
+@router.post("/", response_model=ResponseModel, include_in_schema=False)
 async def create_report(
     rep: ReportCreate,
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db)
 ) -> Any:
-    """创建新报告"""
+    """创建新报告
+
+    同时注册 "" 与 "/" 两条路径 (main.py: redirect_slashes=False 避免丢 Authorization 头):
+    - POST /api/v1/reports
+    - POST /api/v1/reports/
+    OpenAPI 文档仅显示前者 (include_in_schema=False), 实际两条都可用.
+    """
     obj = await rep_service.create_report(session, rep)
     return success_response(data=ReportOut.model_validate(obj).model_dump())
 
-@router.get("/", response_model=ResponseModel)
+@router.get("", response_model=ResponseModel)
+@router.get("/", response_model=ResponseModel, include_in_schema=False)
 async def list_reports(
     task_id: Optional[str] = None,    # 按任务 ID 筛选
     q: Optional[str] = None,           # 关键词搜索（匹配标题和摘要）
@@ -147,6 +159,10 @@ async def create_report_from_workflow(
         summary=req.summary,
         chart_images=req.chart_images,
         dimension_illustrations=req.dimension_illustrations,
+        # html-ppt Phase 1
+        page_model=req.page_model,
+        theme=req.theme,
+        notes_summary=req.notes_summary,
     )
     return success_response(data=ReportOut.model_validate(obj).model_dump())
 
@@ -160,19 +176,176 @@ async def upload_report(
     try:
         content = await file.read()
         obj = await rep_service.upload_report(session, content, file.filename, title)
-        # lazy 模式：用户在 UI 上传 = 用户主动确认，立即同步触发 Milvus 写入
-        await rep_service.upload_to_vector_store_if_pending(session, obj.id)
+        # lazy 模式：用户在 UI 上传 = 用户主动确认，立即同步触发 Milvus 写入（暂时禁用，避免过慢）
+        # await rep_service.upload_to_vector_store_if_pending(session, obj.id)
         # 重新读取以拿到更新后的 pending_vector_upload / vector_uploaded_at
         await session.refresh(obj)
         return success_response(data=ReportOut.model_validate(obj).model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/{report_id}/preview")
+async def preview_report_html(
+    report_id: int,
+    theme: str = Query("minimal-white", description="html-ppt 主题名（36 套之一）"),
+    current_user: User = Depends(get_current_active_user_sse),
+    session: AsyncSession = Depends(get_db)
+) -> Response:
+    """
+    预览报告的 html-ppt HTML 版本
+
+    返回完整的 html-ppt 风格 HTML 页面，可直接嵌入 iframe 展示。
+    与导出流程使用相同的 HTML 生成逻辑，确保所见即所得。
+
+    Phase 1:
+    - 优先使用 report.page_model（结构化 PageModel 列表）
+    - 旧报告（page_model IS NULL）回退到 MarkdownPageParser 路径
+    - theme 参数: 不在白名单时降级到 minimal-white + WARN 日志
+    """
+    from app.services.markdown_parser import MarkdownPageParser
+    from app.services.quality_validator import QualityValidator
+    from app.services.html_report_generator import HTMLReportGenerator, HTMLPageModel, HTMLTextBlock, HTMLImageBlock, LayoutType
+
+    report = await rep_service.get_report(session, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # 0) 最优先：直接使用存储的 html_content（由 ReporterAgent 生成，包含完整图表/KPI/布局）
+    if report.html_content and len(report.html_content.strip()) > 500:
+        # 替换主题（如果用户请求了不同主题）
+        from app.services.html_report_generator import HTMLReportGenerator as _Gen
+        available_themes = _Gen(theme="minimal-white").available_themes
+        if theme not in available_themes:
+            theme = "minimal-white"
+
+        html_content = report.html_content
+        # 替换 data-theme 属性
+        import re
+        html_content = re.sub(r'data-theme="[^"]*"', f'data-theme="{theme}"', html_content)
+        # 替换主题 CSS 链接
+        html_content = re.sub(
+            r'href="[^"]*themes/[^"]*\.css"',
+            f'href="/static/html-ppt/assets/themes/{theme}.css"',
+            html_content,
+        )
+
+        logging.getLogger(__name__).info(
+            "[preview] report %s using stored html_content (%d chars, theme=%s)",
+            report_id, len(html_content), theme,
+        )
+        return Response(
+            content=html_content,
+            media_type="text/html; charset=utf-8",
+        )
+
+    # 1) 主题白名单校验
+    from app.services.html_report_generator import HTMLReportGenerator as _Gen
+    available_themes = _Gen(theme="minimal-white").available_themes
+    if theme not in available_themes:
+        logging.getLogger(__name__).warning(
+            "[preview] theme=%s not in whitelist, fallback to minimal-white", theme
+        )
+        theme = "minimal-white"
+
+    # 2) 优先用 report.page_model, 旧报告 fallback 到 MarkdownPageParser
+    page_model = None
+    if report.page_model and isinstance(report.page_model, list) and len(report.page_model) > 0:
+        try:
+            # 从 JSON dict 列表重建 ReportPageModel
+            from app.services.report_page_model import (
+                ReportPageModel, PageModel, TextBlock, ImageBlock, TableBlock,
+            )
+
+            pages: List[PageModel] = []
+            for idx, p in enumerate(report.page_model):
+                tb = [
+                    TextBlock(text=(b.get("text", "") or ""), style="body")
+                    for b in (p.get("text_blocks") or [])
+                ]
+                # 分离 title / body
+                title_text = p.get("title", "")
+                if title_text:
+                    tb = [TextBlock(text=title_text, style="title", font_size=22, bold=True)] + tb
+                imgs = []
+                for ib in (p.get("image_blocks") or []):
+                    b64_or_url = ib.get("base64") or ib.get("url") or ""
+                    if b64_or_url and not b64_or_url.startswith("data:"):
+                        b64_or_url = f"data:image/png;base64,{b64_or_url}"
+                    imgs.append(ImageBlock(
+                        base64=b64_or_url.split(",", 1)[-1] if "," in b64_or_url else b64_or_url,
+                        alt=ib.get("caption", "") or ib.get("alt", ""),
+                    ))
+                tables = []
+                td = p.get("table_data")
+                if td and isinstance(td, dict):
+                    tables.append(TableBlock(
+                        headers=td.get("headers", []) or [],
+                        rows=td.get("rows", []) or [],
+                    ))
+                pages.append(PageModel(
+                    page_type=p.get("page_type", "content") or "content",
+                    title=title_text or f"第 {idx + 1} 页",
+                    subtitle=p.get("subtitle", "") or "",
+                    kicker=p.get("kicker", "") or "",
+                    text_blocks=tb,
+                    images=imgs,
+                    tables=tables,
+                    kpi_metrics=p.get("kpi_metrics", []) or [],
+                    section_number=p.get("section_number", 0) or 0,
+                    layout_hint="text_only",
+                ))
+            page_model = ReportPageModel(
+                title=report.title,
+                pages=pages,
+                metadata={"task_id": report.task_id or str(report.id), "source": "page_model"},
+            )
+            logging.getLogger(__name__).info(
+                "[preview] report %s using stored page_model: %d pages", report_id, len(pages)
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[preview] failed to rebuild page_model for report %s: %s, "
+                "falling back to MarkdownPageParser", report_id, e,
+            )
+            page_model = None
+
+    if page_model is None:
+        # 旧报告兼容: 用 MarkdownPageParser 解析 content_markdown
+        if not report.content_markdown:
+            raise HTTPException(status_code=400, detail="Report has no content to preview")
+
+        logging.getLogger(__name__).info(
+            "[preview] report %s has no page_model, falling back to MarkdownPageParser",
+            report_id,
+        )
+        parser = MarkdownPageParser()
+        page_model = parser.parse(
+            markdown=report.content_markdown,
+            title=report.title,
+            chart_images=report.images or [],
+            metadata={"task_id": report.task_id or str(report.id), "source": "markdown"},
+        )
+        # 质量校验
+        validator = QualityValidator()
+        validation = validator.validate(page_model)
+        page_model = validation.fixed_model or page_model
+
+    # 3) 转换为 HTML 页面模型并生成 HTML（使用绝对路径确保从任何 URL 加载都能正确解析静态资源）
+    html_pages = rep_service._convert_pages_to_html(page_model.pages)
+    generator = HTMLReportGenerator(theme=theme, use_absolute_paths=True)
+    html_content = generator.generate(html_pages)
+
+    return Response(
+        content=html_content,
+        media_type="text/html; charset=utf-8",
+    )
+
 @router.get("/{report_id}/export")
 async def export_report(
     report_id: int,
-    fmt: str = Query("docx", description="导出格式:docx、pdf 或 md"),
+    fmt: str = Query("docx", description="导出格式:docx、pdf、md、pptx"),
     template_id: Optional[str] = Query(None, description="PPT 母版模板 ID（仅当 fmt=pptx 时生效）"),
+    use_html_pipeline: bool = Query(True, description="是否使用HTML生成流程（高质量）"),
     current_user: User = Depends(get_current_active_user_sse),
     session: AsyncSession = Depends(get_db)
 ) -> Response:
@@ -193,11 +366,108 @@ async def export_report(
       (这样前端 fetch 失败时能看到真实原因,便于排查 CJK 字体等问题)
     """
     try:
-        # 首次导出时自动写入 Milvus
-        await rep_service.upload_to_vector_store_if_pending(session, report_id)
-        filename, media_type, content = await rep_service.export_report(
-            session, report_id, fmt, template_id=template_id,
-        )
+        # 首次导出时自动写入 Milvus（暂时禁用，避免导出过慢）
+        # await rep_service.upload_to_vector_store_if_pending(session, report_id)
+
+        if use_html_pipeline:
+            # 使用新的 HTML 生成流程
+            # 布局决策由 ReportService._choose_layout 统一处理, 不再需要 ReporterAgent.
+
+            # 读取报告
+            report = await rep_service.get_report(session, report_id)
+            if not report:
+                raise ValueError("Report not found")
+
+            # Phase 1: 优先用 report.page_model, 旧报告 fallback 到 MarkdownPageParser
+            from app.services.markdown_parser import MarkdownPageParser
+            from app.services.quality_validator import QualityValidator
+            from app.services.report_page_model import (
+                ReportPageModel, PageModel, TextBlock, ImageBlock, TableBlock,
+            )
+
+            page_model = None
+            if report.page_model and isinstance(report.page_model, list) and len(report.page_model) > 0:
+                try:
+                    pages: List[PageModel] = []
+                    for idx, p in enumerate(report.page_model):
+                        # 注意: 不能用 tb 作为局部变量, 会遮蔽顶部的 `import traceback as tb`
+                        tb_list = [
+                            TextBlock(text=(b.get("text", "") or ""), style="body")
+                            for b in (p.get("text_blocks") or [])
+                        ]
+                        title_text = p.get("title", "")
+                        if title_text:
+                            tb_list = [TextBlock(text=title_text, style="title", font_size=22, bold=True)] + tb_list
+                        imgs = []
+                        for ib in (p.get("image_blocks") or []):
+                            b64_or_url = ib.get("base64") or ib.get("url") or ""
+                            if b64_or_url and not b64_or_url.startswith("data:"):
+                                b64_or_url = f"data:image/png;base64,{b64_or_url}"
+                            imgs.append(ImageBlock(
+                                base64=b64_or_url.split(",", 1)[-1] if "," in b64_or_url else b64_or_url,
+                                alt=ib.get("caption", "") or ib.get("alt", ""),
+                            ))
+                        tables = []
+                        td = p.get("table_data")
+                        if td and isinstance(td, dict):
+                            tables.append(TableBlock(
+                                headers=td.get("headers", []) or [],
+                                rows=td.get("rows", []) or [],
+                            ))
+                        pages.append(PageModel(
+                            page_type=p.get("page_type", "content") or "content",
+                            title=title_text or f"第 {idx + 1} 页",
+                            subtitle=p.get("subtitle", "") or "",
+                            kicker=p.get("kicker", "") or "",
+                            text_blocks=tb_list,
+                            images=imgs,
+                            tables=tables,
+                            kpi_metrics=p.get("kpi_metrics", []) or [],
+                            section_number=p.get("section_number", 0) or 0,
+                            layout_hint="text_only",
+                        ))
+                    page_model = ReportPageModel(
+                        title=report.title,
+                        pages=pages,
+                        metadata={"task_id": report.task_id or str(report.id), "source": "page_model"},
+                    )
+                    logging.getLogger(__name__).info(
+                        "[export] report %s using stored page_model: %d pages", report_id, len(pages)
+                    )
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[export] failed to rebuild page_model for report %s: %s, "
+                        "falling back to MarkdownPageParser", report_id, e,
+                    )
+                    page_model = None
+
+            if page_model is None:
+                # 旧报告兼容: 走 MarkdownPageParser
+                if not report.content_markdown:
+                    filename, media_type, content = await rep_service.export_report(
+                        session, report_id, fmt, template_id=template_id,
+                    )
+                else:
+                    parser = MarkdownPageParser()
+                    page_model = parser.parse(
+                        markdown=report.content_markdown,
+                        title=report.title,
+                        chart_images=report.images or [],
+                        metadata={"task_id": report.task_id or str(report.id), "source": "markdown"},
+                    )
+                    validator = QualityValidator()
+                    validation = validator.validate(page_model)
+                    page_model = validation.fixed_model or page_model
+
+            # 使用 HTML 流程导出
+            filename, media_type, content = await rep_service.export_report_with_html_pipeline(
+                session, report_id, fmt, page_model, template_id
+            )
+        else:
+            # 使用旧版流程
+            filename, media_type, content = await rep_service.export_report(
+                session, report_id, fmt, template_id=template_id,
+            )
 
         # 导出成功后异步触发邮件推送
         asyncio.create_task(_trigger_export_notification(report_id, filename, content))
@@ -210,9 +480,8 @@ async def export_report(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logging.getLogger(__name__).error(
-            "export_report failed (id=%s fmt=%s): %s\n%s",
-            report_id, fmt, e, tb.format_exc(),
+        logging.getLogger(__name__).exception(
+            "export_report failed (id=%s fmt=%s)", report_id, fmt,
         )
         raise HTTPException(
             status_code=500,

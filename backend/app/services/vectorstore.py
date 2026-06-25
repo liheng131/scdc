@@ -6,12 +6,25 @@ Milvus 向量存储服务
 """
 
 import logging
+import threading
 from pymilvus import connections, Collection, CollectionSchema, FieldSchema, DataType, utility
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "scdc_reports"
+
+# PyMilvus 3.0+ 的 connections.connect 在某些环境下会 hang 住, 强制 5s 上限
+_MILVUS_CONNECT_TIMEOUT = 5
+
+
+def _connect_with_timeout(uri: str, timeout: float, result: dict):
+    """在线程中调用 pymilvus connect, 通过 daemon 线程强制超时"""
+    try:
+        connections.connect(alias="default", uri=uri, timeout=timeout)
+        result["ok"] = True
+    except Exception as e:
+        result["err"] = e
 
 
 class VectorStoreService:
@@ -20,12 +33,26 @@ class VectorStoreService:
     def __init__(self):
         self._connected = False
         self._collection = None
-        try:
-            connections.connect(alias="default", uri=settings.milvus_url, timeout=5)
+        # 强制超时连接 (PyMilvus 已知在某些情况下会 hang 住)
+        result = {}
+        t = threading.Thread(
+            target=_connect_with_timeout,
+            args=(settings.milvus_url, _MILVUS_CONNECT_TIMEOUT, result),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=_MILVUS_CONNECT_TIMEOUT + 1.5)  # 给 pymilvus 自身 timeout 留 1.5s 余量
+        if t.is_alive():
+            logger.warning(
+                "Milvus connect timeout (%.1fs), continuing without Milvus — "
+                "vector search/RAG will be unavailable", _MILVUS_CONNECT_TIMEOUT + 1.5,
+            )
+            return
+        if result.get("ok"):
             self._connected = True
             logger.info("Connected to Milvus at %s", settings.milvus_url)
-        except Exception as e:
-            logger.warning("Failed to connect to Milvus at %s: %s", settings.milvus_url, e)
+        else:
+            logger.warning("Failed to connect to Milvus at %s: %s", settings.milvus_url, result.get("err"))
 
     def _ensure_connected(self):
         if not self._connected:

@@ -53,11 +53,21 @@ export const reportsApi = {
     return res.data;
   },
 
-  exportReportUrl: (id: number, fmt: string = 'docx', template_id?: string): string => {
+  exportReportUrl: (id: number, fmt: string = 'docx', template_id?: string, use_html_pipeline: boolean = true, theme?: string): string => {
     const base = import.meta.env.VITE_API_BASE_URL || '';
     const params = new URLSearchParams({ fmt });
     if (template_id) params.set('template_id', template_id);
+    if (use_html_pipeline) params.set('use_html_pipeline', 'true');
+    if (theme) params.set('theme', theme);
     return `${base}/api/v1/reports/${id}/export?${params.toString()}`;
+  },
+
+  previewReportUrl: (id: number, theme?: string): string => {
+    const base = import.meta.env.VITE_API_BASE_URL || '';
+    const params = new URLSearchParams();
+    if (theme) params.set('theme', theme);
+    const query = params.toString();
+    return `${base}/api/v1/reports/${id}/preview${query ? `?${query}` : ''}`;
   },
 
   listPptTemplates: async (): Promise<ApiResponse<{ items: Array<{ id: string; name: string; description: string; file: string; layouts_count: number }>; total: number }>> => {

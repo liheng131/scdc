@@ -10,11 +10,37 @@ FastAPI 应用入口文件
 6. 注册所有 API 路由（/api/v1 前缀）
 """
 
+import sys
+
+# 必须在任何事件循环创建之前设置 —— Windows 默认 SelectorEventLoop 不支持 subprocess,
+# Playwright 启动浏览器需要 ProactorEventLoop,否则会抛 NotImplementedError。
+# 注意: 这一段必须位于文件最顶部、在所有其他 import 之前,
+# 这样 uvicorn --reload 派生的子进程也会先于任何事件循环执行到。
+if sys.platform == "win32":
+    import asyncio as _asyncio
+
+    # 方案: 直接替换 asyncio.DefaultEventLoopPolicy 类,
+    # 这样 uvicorn 调用 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+    # 时, 实际拿到的是 WindowsProactorEventLoopPolicy。
+    # 比猴子补丁 set_event_loop_policy 函数更可靠。
+    _asyncio.DefaultEventLoopPolicy = _asyncio.WindowsProactorEventLoopPolicy
+
+    # 同时设置当前策略
+    _asyncio.set_event_loop_policy(_asyncio.WindowsProactorEventLoopPolicy())
+
+    import logging as _logging
+    _logging.getLogger(__name__).info(
+        "[startup] Windows: replaced asyncio.DefaultEventLoopPolicy with WindowsProactorEventLoopPolicy"
+    )
+
+import asyncio
 import logging
+import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.api.responses import error_response
@@ -41,6 +67,22 @@ logger = logging.getLogger(__name__)
 
 # 定时任务调度器全局单例，使用数据库会话工厂以便查询和更新任务状态
 scheduler = SchedulerService(async_session_factory=async_session_factory)
+
+
+async def _startup_with_timeout(coro, name: str, timeout: float = 30.0):
+    """为 lifespan 启动阶段的每个 await 加超时保护,避免外部服务 hang 住导致 8000 端口永远不绑定"""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[STARTUP TIMEOUT] %s 超时 (%.0fs), 跳过并继续启动 — "
+            "相关功能在请求时可能降级",
+            name, timeout,
+        )
+        return None
+    except Exception as e:
+        logger.warning("[STARTUP FAIL] %s 失败: %s — 继续启动", name, e)
+        return None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -120,11 +162,15 @@ async def lifespan(app: FastAPI):
             from app.core.security import encrypt_api_key
             encrypted_key = encrypt_api_key(api_key)
 
-            # 按类型分别检查并补全，确保三种模型配置都存在
+            # 按类型分别检查并补全,确保三种模型配置都存在
+            # 注意: 优先使用 .env 中的 base_url/api_key (本地开发) ,
+            #      若 .env 未配置 llm_base_url, 降级到本地 Ollama (11434) 用于 llm/rerank
+            _fallback_base = base_url or "http://localhost:11434"
+            _fallback_key = encrypted_key or ""
             model_defaults = [
-                ("llm", provider, model_name, "http://120.79.96.231:6003", "gpustack_8bbcf8bfb8db1e90_f208fce3866f9aa43e912cc816ef92a8"),
-                ("embedding", "ollama", embedding_model, base_url, ""),
-                ("rerank", provider, "bge-reranker-v2-m3", "http://120.79.96.231:6003", "gpustack_8bbcf8bfb8db1e90_f208fce3866f9aa43e912cc816ef92a8"),
+                ("llm", provider or "ollama", model_name or "qwen2.5:7b", _fallback_base, _fallback_key),
+                ("embedding", "ollama", embedding_model, base_url or "http://localhost:11434", ""),
+                ("rerank", provider or "ollama", "bge-reranker-v2-m3", _fallback_base, _fallback_key),
             ]
             for mtype, mprovider, mname, murl, mkey in model_defaults:
                 exist = await conn.execute(
@@ -181,13 +227,16 @@ async def lifespan(app: FastAPI):
         vectorstore = VectorStoreService()
         try:
             embedding_service = EmbeddingService()
-            test_vector = await embedding_service.embed_texts_or_empty(["test"])
+            test_vector = await _startup_with_timeout(
+                embedding_service.embed_texts_or_empty(["test"]),
+                "embed_texts_or_empty", timeout=15,
+            )
             dim = len(test_vector[0]) if test_vector and test_vector[0] else 768
             logger.info("Detected embedding dimension: %d", dim)
         except Exception as e:
             logger.warning("Failed to detect embedding dimension: %s, falling back to 768", e)
             dim = 768
-        vectorstore.init_collection(dim=dim)
+        await asyncio.to_thread(vectorstore.init_collection, dim=dim)
     except Exception as e:
         logger.warning("Failed to initialize Milvus collection: %s", e)
     logger.info("Starting scheduler loop...")
@@ -268,3 +317,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # 所有业务路由统一挂载到 /api/v1 前缀下
 app.include_router(api_router, prefix="/api/v1")
+
+# 挂载 static 目录（html-ppt 资源、CSS、JS、图片等）
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    logger.info("Static files mounted at /static from %s", _STATIC_DIR)

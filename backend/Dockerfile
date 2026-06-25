@@ -22,8 +22,40 @@ FROM python:3.11-slim
 WORKDIR /app
 # 使用阿里云镜像加速 apt 源
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
-# 仅安装运行时依赖（libpq5 是 psycopg2 运行时需要的库，wqy-microhei 是中文 PDF 导出所需字体）
-RUN apt-get update && apt-get install -y --no-install-recommends libpq5 fonts-wqy-microhei && rm -rf /var/lib/apt/lists/*
+
+# 安装运行时依赖：
+#   libpq5          - psycopg2 运行时库
+#   chromium        - HTML→PPT/PDF 渲染引擎（Chromium 内核，与 Edge 同源）
+#   chromium-sandbox - Chromium 沙箱（安全运行所需）
+#   fonts-*         - 中日韩字体，确保 PDF/PPT 中文正常显示
+#   libnss3 等      - Chromium 运行所需的共享库
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    chromium \
+    chromium-sandbox \
+    fonts-wqy-microhei \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libxshmfence1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 环境变量：跳过 Playwright 内置浏览器下载（使用系统 Chromium）
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# 指定系统 Chromium 路径（供 PlaywrightRenderer 使用）
+ENV SYSTEM_CHROMIUM_PATH=/usr/bin/chromium
 
 # 从构建阶段复制预编译的 wheels
 COPY --from=builder /app/wheels /wheels

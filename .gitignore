@@ -90,3 +90,4 @@ test_null_title_export.py
 test_recent_exports.py
 test_ppt_output.*
 gitee_refs.txt
+AGENTS.md

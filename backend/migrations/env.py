@@ -1,8 +1,13 @@
 import asyncio
+import os
+import sys
 from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
+
+# 把 backend 根目录加入 sys.path，避免 No module named 'app'
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.core.config import settings
 from app.models.base import Base

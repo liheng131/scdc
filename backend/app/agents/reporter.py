@@ -1471,6 +1471,42 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 
         return modified_report
 
+    def _build_chart_data_from_metrics(self, metric) -> Optional[Dict[str, Any]]:
+        """Convert a StructuredMetric into Chart.js chart_data config."""
+        if not metric.data_points or len(metric.data_points) < 2:
+            return None
+        labels = [dp.label for dp in metric.data_points]
+        values = [dp.value for dp in metric.data_points]
+        chart_type = metric.chart_type_hint if metric.chart_type_hint in ("bar", "line", "pie") else "bar"
+        if chart_type == "pie":
+            return {
+                "labels": labels,
+                "datasets": [{"label": metric.metric_name, "data": values}],
+                "options": {
+                    "plugins": {"legend": {"labels": {"color": "var(--text-2)"}}}
+                },
+            }
+        return {
+            "labels": labels,
+            "datasets": [{"label": metric.metric_name, "data": values}],
+            "options": {
+                "plugins": {"legend": {"labels": {"color": "var(--text-2)"}}},
+                "scales": {
+                    "x": {"ticks": {"color": "var(--text-2)"}, "grid": {"color": "var(--border)"}},
+                    "y": {"ticks": {"color": "var(--text-2)"}, "grid": {"color": "var(--border)"}},
+                },
+            },
+        }
+
+    def _metric_to_layout_type(self, metric) -> str:
+        """Choose the best chart layout name for a StructuredMetric."""
+        hint = (metric.chart_type_hint or "bar").lower()
+        if hint == "line":
+            return "chart_line"
+        if hint == "pie":
+            return "chart_pie"
+        return "chart_bar"
+
     def _build_html_report(
         self,
         topic: str,
@@ -1485,7 +1521,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         """Build a complete HTML report using the html-ppt design system.
 
         Generates a full presentation with cover, TOC, executive summary,
-        dimension analysis pages, and thanks page.
+        dimension analysis pages with charts, KPI grids, and thanks page.
 
         Args:
             user_images: List of dicts with 'base64' and optional 'caption' keys
@@ -1513,14 +1549,14 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             kicker="Market Insight Report",
             text_blocks=[
                 HTMLTextBlock(text=summary[:200] if summary else ""),
-                HTMLTextBlock(text=f"SCDC AI Agent System"),
+                HTMLTextBlock(text="SCDC AI Agent System"),
                 HTMLTextBlock(text=datetime.datetime.now().strftime("%Y-%m-%d")),
             ],
             notes=summary[:300] if summary else topic,
         ))
 
         # 2) TOC page
-        toc_items = ["Executive Summary"] + list(dimensions) + ["Conclusion"]
+        toc_items = ["Executive Summary"] + list(dimensions) + ["Data Visualization", "Conclusion"]
         pages.append(HTMLPageModel(
             title="Contents",
             layout=LayoutType.TOC,
@@ -1529,18 +1565,62 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 
         # 3) Executive Summary page
         if summary:
-            # Split summary into paragraphs for better display
             paragraphs = [p.strip() for p in summary.split("\n") if p.strip()]
             text_blocks = [HTMLTextBlock(text=p, is_lead=(i == 0)) for i, p in enumerate(paragraphs[:4])]
+            # Build a summary chart from dimension insight counts
+            dim_counts = {}
+            for ins in insights:
+                dim = ins.dimension or "General"
+                dim_counts[dim] = dim_counts.get(dim, 0) + 1
+            summary_chart = None
+            if dim_counts and len(dim_counts) >= 2:
+                summary_chart = {
+                    "labels": list(dim_counts.keys()),
+                    "datasets": [{
+                        "label": "Insights",
+                        "data": list(dim_counts.values()),
+                    }],
+                }
             pages.append(HTMLPageModel(
                 title="Executive Summary",
                 layout=LayoutType.CONTENT,
                 kicker="Summary",
                 text_blocks=text_blocks,
+                chart_data=summary_chart,
                 notes=summary[:300],
             ))
 
-        # 4) Dimension analysis pages
+        # 3.5) Global KPI overview from all structured metrics
+        if structured_metrics:
+            all_kpi_items = []
+            for m in structured_metrics[:6]:
+                if m.data_points:
+                    latest = m.data_points[-1]
+                    change = ""
+                    trend = "up"
+                    if len(m.data_points) >= 2:
+                        prev = m.data_points[-2].value
+                        if prev != 0:
+                            pct = ((latest.value - prev) / abs(prev)) * 100
+                            change = f"{pct:+.1f}%"
+                            trend = "up" if pct >= 0 else "down"
+                    all_kpi_items.append({
+                        "label": m.metric_name,
+                        "value": f"{latest.value}{m.unit}",
+                        "raw_value": latest.value,
+                        "unit": m.unit,
+                        "change": change,
+                        "trend": trend,
+                    })
+            if all_kpi_items:
+                pages.append(HTMLPageModel(
+                    title="Key Metrics Overview",
+                    layout=LayoutType.KPI_GRID,
+                    kicker="Overview",
+                    kpi_metrics=all_kpi_items[:4],
+                ))
+
+        # 4) Dimension analysis pages with charts and KPI
         dim_insights: Dict[str, List[Insight]] = {}
         for ins in insights:
             dim = ins.dimension or "General Analysis"
@@ -1556,56 +1636,109 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             ))
 
             if dim_list:
-                # Content page with insights
-                text_blocks = []
-                for ins in dim_list[:3]:
-                    text_blocks.append(HTMLTextBlock(
-                        text=f"{ins.conclusion} (Confidence: {ins.confidence:.0%})",
-                        emphasis=[ins.conclusion[:30]],
+                # Bullets page with key insights (more visual than plain content)
+                bullet_blocks = []
+                for ins in dim_list[:5]:
+                    bullet_blocks.append(HTMLTextBlock(
+                        text=ins.conclusion,
+                        emphasis=[ins.conclusion[:25]],
+                        is_bullet=True,
                     ))
-                    if ins.analysis:
-                        text_blocks.append(HTMLTextBlock(text=ins.analysis[:300]))
                 pages.append(HTMLPageModel(
-                    title=dim,
-                    layout=LayoutType.CONTENT,
-                    kicker="Analysis",
-                    text_blocks=text_blocks,
+                    title=f"{dim} — Key Findings",
+                    layout=LayoutType.BULLETS,
+                    kicker="Key Points",
+                    text_blocks=bullet_blocks,
                 ))
 
-                # KPI page if structured metrics available for this dimension
+                # Content page with detailed analysis + chart
+                text_blocks = []
+                for ins in dim_list[:3]:
+                    if ins.analysis:
+                        text_blocks.append(HTMLTextBlock(text=ins.analysis[:300]))
+                if text_blocks:
+                    # Build a chart from insight confidence scores
+                    insight_chart = None
+                    if len(dim_list) >= 2:
+                        insight_chart = {
+                            "labels": [ins.conclusion[:15] for ins in dim_list[:6]],
+                            "datasets": [{
+                                "label": "Confidence",
+                                "data": [round(ins.confidence, 2) for ins in dim_list[:6]],
+                            }],
+                        }
+                    pages.append(HTMLPageModel(
+                        title=f"{dim} — Detailed Analysis",
+                        layout=LayoutType.CONTENT,
+                        kicker="Analysis",
+                        text_blocks=text_blocks,
+                        chart_data=insight_chart,
+                    ))
+
+                # Chart pages from structured metrics
                 if structured_metrics:
                     dim_metrics = [
                         m for m in structured_metrics
                         if m.dimension and m.dimension.strip() == dim.strip()
                     ]
-                    if dim_metrics:
-                        kpi_items = []
-                        for m in dim_metrics[:4]:
-                            if m.data_points:
-                                latest = m.data_points[-1]
-                                change = ""
-                                trend = "up"
-                                if len(m.data_points) >= 2:
-                                    prev = m.data_points[-2].value
-                                    if prev != 0:
-                                        pct = ((latest.value - prev) / abs(prev)) * 100
-                                        change = f"{pct:+.1f}%"
-                                        trend = "up" if pct >= 0 else "down"
-                                kpi_items.append({
-                                    "label": m.metric_name,
-                                    "value": f"{latest.value}{m.unit}",
-                                    "raw_value": latest.value,
-                                    "unit": m.unit,
-                                    "change": change,
-                                    "trend": trend,
-                                })
-                        if kpi_items:
+
+                    # KPI grid page
+                    kpi_items = []
+                    for m in dim_metrics[:4]:
+                        if m.data_points:
+                            latest = m.data_points[-1]
+                            change = ""
+                            trend = "up"
+                            if len(m.data_points) >= 2:
+                                prev = m.data_points[-2].value
+                                if prev != 0:
+                                    pct = ((latest.value - prev) / abs(prev)) * 100
+                                    change = f"{pct:+.1f}%"
+                                    trend = "up" if pct >= 0 else "down"
+                            kpi_items.append({
+                                "label": m.metric_name,
+                                "value": f"{latest.value}{m.unit}",
+                                "raw_value": latest.value,
+                                "unit": m.unit,
+                                "change": change,
+                                "trend": trend,
+                            })
+                    if kpi_items:
+                        pages.append(HTMLPageModel(
+                            title=f"{dim} — Key Metrics",
+                            layout=LayoutType.KPI_GRID,
+                            kicker="Metrics",
+                            kpi_metrics=kpi_items,
+                        ))
+
+                    # Chart visualization pages (one per metric with chart data)
+                    for metric in dim_metrics[:2]:
+                        chart_data = self._build_chart_data_from_metrics(metric)
+                        if chart_data:
+                            layout_name = self._metric_to_layout_type(metric)
+                            chart_layout = getattr(LayoutType, layout_name.upper(), LayoutType.CHART_BAR)
+                            source_text = f"Source: {metric.source}" if metric.source else ""
                             pages.append(HTMLPageModel(
-                                title=f"{dim} — Key Metrics",
-                                layout=LayoutType.KPI_GRID,
-                                kicker="Metrics",
-                                kpi_metrics=kpi_items,
+                                title=metric.metric_name,
+                                layout=chart_layout,
+                                kicker=f"{dim} · {metric.metric_type}",
+                                chart_data=chart_data,
+                                text_blocks=[HTMLTextBlock(text=source_text)] if source_text else [],
                             ))
+
+                    # Table page for metrics summary
+                    if len(dim_metrics) >= 2:
+                        headers = ["Metric", "Latest Value", "Unit", "Type"]
+                        rows = []
+                        for m in dim_metrics[:6]:
+                            latest_val = str(m.data_points[-1].value) if m.data_points else "N/A"
+                            rows.append([m.metric_name, latest_val, m.unit, m.metric_type])
+                        pages.append(HTMLPageModel(
+                            title=f"{dim} — Data Summary",
+                            layout=LayoutType.TABLE,
+                            kicker="Data",
+                            table_data={"headers": headers, "rows": rows},
+                        ))
             else:
                 pages.append(HTMLPageModel(
                     title=dim,
@@ -1614,7 +1747,29 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                     text_blocks=[HTMLTextBlock(text="Insufficient data for this dimension.")],
                 ))
 
-        # 5) User and web images gallery
+        # 5) Global metrics overview (if we have structured_metrics across dimensions)
+        if structured_metrics:
+            # Stat highlight page for the most important metric
+            all_metrics_with_data = [m for m in structured_metrics if m.data_points]
+            if all_metrics_with_data:
+                # Pick the metric with the most data points as the headline stat
+                headline = max(all_metrics_with_data, key=lambda m: len(m.data_points))
+                if headline.data_points:
+                    latest = headline.data_points[-1]
+                    pages.append(HTMLPageModel(
+                        title=headline.metric_name,
+                        layout=LayoutType.STAT_HIGHLIGHT,
+                        kicker="Headline Metric",
+                        kpi_metrics=[{
+                            "label": headline.metric_name,
+                            "value": f"{latest.value}",
+                            "raw_value": latest.value,
+                            "unit": headline.unit,
+                        }],
+                        text_blocks=[HTMLTextBlock(text=f"Latest data: {latest.label}")],
+                    ))
+
+        # 6) User and web images gallery
         all_images: List[HTMLImageBlock] = []
         for img in (user_images or []):
             b64 = img.get("base64", "")
@@ -1641,7 +1796,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 notes="用户上传及网页提取的参考图片",
             ))
 
-        # 6) Thanks page
+        # 7) Thanks page
         pages.append(HTMLPageModel(
             title="Thank You",
             layout=LayoutType.THANKS,

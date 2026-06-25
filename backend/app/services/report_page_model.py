@@ -109,16 +109,32 @@ class TableBlock:
 
 @dataclass
 class PageModel:
-    """单页模型 —— PPT/PDF/Word 共享的最小单元"""
+    """单页模型 —— PPT/PDF/Word 共享的最小单元
+
+    html-ppt 语义字段（Phase 1 新增，全部 optional，保持向后兼容）：
+    - layout: 31 个 html-ppt layouts 之一（cover/toc/section/bullets/kpi_grid/...）
+    - animations: data-anim 值列表（fade-up / fade-left / rise-in / counter-up / ...）
+    - data_fx: canvas FX 标识（knowledge-graph / particle-burst / confetti-cannon / ...）
+    - notes: 150-300 字演讲者逐字稿
+    - kpi_metrics: KPI 卡片数据（[{label, value, raw_value, change, trend, unit}]）
+    - kicker: 章节小标/眉头
+    """
     page_type: str                # cover / toc / section / content / picture / summary
     title: str = ""
     subtitle: str = ""
+    kicker: str = ""              # 章节小标（封面/章节页眉头用）
     text_blocks: List[TextBlock] = field(default_factory=list)
     images: List[ImageBlock] = field(default_factory=list)
     tables: List[TableBlock] = field(default_factory=list)
+    kpi_metrics: List[Dict[str, Any]] = field(default_factory=list)  # KPI 卡片数据
+    animations: List[str] = field(default_factory=list)              # data-anim 值列表
+    data_fx: str = ""                                                # canvas FX 标识
+    notes: str = ""                                                  # 演讲者逐字稿
     layout_hint: str = "text_top"  # text_top / text_left / image_only / text_only
     bg_color: str = DEFAULT_BG_COLOR
     section_number: int = 0
+    # html-ppt layout 名称（与 LayoutType 对齐，缺省由 _choose_layout 决定）
+    layout: str = ""
 
     @property
     def total_chars(self) -> int:
