@@ -191,7 +191,8 @@ The analysis MUST be structured into the following dimensions (do NOT use any ot
    - Year-over-year (YoY) or Quarter-over-Quarter (QoQ) growth rates
    - Market share distributions (percentages per company/segment)
    - Regional breakdowns or category comparisons
-   Each structured_metric MUST have: metric_name, metric_type (yearly_trend/quarterly_trend/monthly_trend/yoy_growth/qoq_growth/market_share/other), unit, dimension, data_points (list of objects with label and value fields), source, chart_type_hint (bar/line/pie).
+   Each structured_metric MUST have: metric_name, metric_type (yearly_trend/quarterly_trend/monthly_trend/yoy_growth/qoq_growth/market_share/other), unit, dimension, data_points (list of objects with label and value fields), period_granularity (year/quarter/month/week — the time granularity of the data_points), source, chart_type_hint (bar/line/pie).
+   When data contains YoY or QoQ comparison data, also include yoy_data and/or qoq_data as additional data_points arrays with the same label+value format (e.g., YoY growth percentages per year).
 
 Output strictly as JSON, no markdown:
 {{
@@ -215,6 +216,11 @@ Output strictly as JSON, no markdown:
         {{"label": "2020", "value": 450}},
         {{"label": "2021", "value": 580}},
         {{"label": "2022", "value": 720}}
+      ],
+      "period_granularity": "year",
+      "yoy_data": [
+        {{"label": "2021", "value": 28.9}},
+        {{"label": "2022", "value": 24.1}}
       ],
       "source": "source_material_title",
       "chart_type_hint": "line"
@@ -286,6 +292,7 @@ SOURCE MATERIALS:
             "yearly_trend", "quarterly_trend", "monthly_trend",
             "yoy_growth", "qoq_growth", "market_share", "other",
         }
+        valid_granularities = {"year", "quarter", "month", "week", ""}
         for rm in raw_metrics:
             if not isinstance(rm, dict):
                 continue
@@ -318,12 +325,56 @@ SOURCE MATERIALS:
                 else:
                     chart_hint = "bar"
 
+            # 解析 period_granularity
+            period_granularity = str(rm.get("period_granularity", "")).lower()
+            if period_granularity not in valid_granularities:
+                period_granularity = ""
+
+            # 解析 yoy_data
+            yoy_data = None
+            raw_yoy = rm.get("yoy_data")
+            if isinstance(raw_yoy, list):
+                yoy_data = []
+                for dp in raw_yoy:
+                    if not isinstance(dp, dict):
+                        continue
+                    try:
+                        yoy_data.append(MetricDataPoint(
+                            label=str(dp.get("label", "")),
+                            value=float(dp.get("value", 0)),
+                        ))
+                    except (ValueError, TypeError):
+                        continue
+                if len(yoy_data) < 2:
+                    yoy_data = None
+
+            # 解析 qoq_data
+            qoq_data = None
+            raw_qoq = rm.get("qoq_data")
+            if isinstance(raw_qoq, list):
+                qoq_data = []
+                for dp in raw_qoq:
+                    if not isinstance(dp, dict):
+                        continue
+                    try:
+                        qoq_data.append(MetricDataPoint(
+                            label=str(dp.get("label", "")),
+                            value=float(dp.get("value", 0)),
+                        ))
+                    except (ValueError, TypeError):
+                        continue
+                if len(qoq_data) < 2:
+                    qoq_data = None
+
             result.append(StructuredMetric(
                 metric_name=str(rm.get("metric_name", "未命名指标")),
                 metric_type=metric_type,
                 unit=str(rm.get("unit", "")),
                 dimension=str(rm.get("dimension", "")),
                 data_points=data_points,
+                period_granularity=period_granularity,
+                yoy_data=yoy_data,
+                qoq_data=qoq_data,
                 source=str(rm.get("source", "")),
                 chart_type_hint=chart_hint,
             ))
@@ -513,8 +564,10 @@ SOURCE MATERIALS:
             })
 
         prompt = self._build_prompt(input_data.topic, input_data.cleaned_items, input_data.dimensions, context_snippets if context_snippets else None)
+        logger.info(f"Calling LLM for analysis (model={self.default_model}, provider={self.llm_provider}, timeout=300s)...")
         try:
-            llm_result = await self._call_llm(prompt)
+            llm_result = await self._call_llm(prompt, timeout=300)
+            logger.info(f"LLM analysis completed for task '{input_data.task_id}'")
             summary = llm_result.get("summary", f"Analysis summary for {input_data.topic}")
             raw_insights = llm_result.get("insights", [])
 

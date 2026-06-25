@@ -162,6 +162,18 @@ class StructuredMetric(BaseModel):
         default_factory=list,
         description="数据点列表"
     )
+    period_granularity: str = Field(
+        default="",
+        description="时间粒度: year, quarter, month, week（为空表示非时序数据）"
+    )
+    yoy_data: Optional[List[MetricDataPoint]] = Field(
+        default=None,
+        description="同比（Year-over-Year）对比数据"
+    )
+    qoq_data: Optional[List[MetricDataPoint]] = Field(
+        default=None,
+        description="环比（Quarter-over-Quarter）对比数据"
+    )
     source: str = Field(default="", description="数据来源说明")
     chart_type_hint: str = Field(
         default="bar",
@@ -200,6 +212,23 @@ class ReporterOutput(BaseModel):
         default_factory=list,
         description="维度配图数据列表，格式: [{'section': str, 'title': str, 'base64': str, 'position': int}]"
     )
+    # ---- html-ppt 结构化输出（Phase 1 新增）----
+    # 完整结构化页面描述；存储为 JSON 序列化的 List[Dict]
+    # 字段由 ReporterAgent prompt 引导 LLM 直接产出，包含 layout/animations/notes/kpi_metrics 等 html-ppt 语义
+    # 若 LLM 未能按结构化格式输出，此字段为空，运行时降级为 markdown 解析路径
+    pages: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="html-ppt 结构化 PageModel 列表（每项为 PageModel dict）",
+    )
+    theme: str = Field(
+        default="minimal-white",
+        description="html-ppt 主题名，36 套之一",
+    )
+    notes_summary: str = Field(
+        default="",
+        description="整份报告的 150 字以内执行摘要（演讲者模式开篇用）",
+    )
+    # ---- 兼容字段 ----
     error: Optional[str] = None
     degraded: bool = False
     metadata: Dict[str, Any] = Field(
