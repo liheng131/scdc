@@ -29,6 +29,7 @@ from sqlalchemy import select
 from app.schemas.agent import CollectorInput, CollectedItem, CollectorOutput
 from app.services.anysearch import AnySearchService
 from app.services.keyword_expander import keyword_expander
+from app.services.web_image_extractor import web_image_extractor
 from app.crawlers.http_crawler import HTTPCrawler
 from app.schemas.crawler import CrawlRequest
 from app.core.db import async_session_factory
@@ -193,14 +194,29 @@ class CollectorAgent:
         # 附件优先于搜索结果
         collected_items = attachment_items + collected_items
 
+        # 4. 从 Top 5 URL 提取网页截图
+        extracted_images = []
+        try:
+            top_urls = [r.url for r in top_results[:5] if r.url]
+            if top_urls:
+                extracted_images = await web_image_extractor.extract_chart_screenshots(
+                    urls=top_urls,
+                    max_images=5,
+                    timeout=15000,
+                )
+        except Exception as e:
+            logger.warning(f"Image extraction failed: {e}")
+
         return CollectorOutput(
             task_id=input_data.task_id,
             success=True,
             items=collected_items,
             expanded_keywords=self._expanded_keywords,
+            extracted_images=extracted_images,
             metadata={
                 "user_attachment_count": len(attachment_items),
                 "keywords_used": keywords,
                 "total_search_results": len(all_results),
+                "extracted_image_count": len(extracted_images),
             },
         )

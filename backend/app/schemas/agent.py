@@ -56,6 +56,7 @@ class CollectorOutput(BaseModel):
     warning: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)  # 阶段元数据(如 user_attachment_count)
     expanded_keywords: List[str] = Field(default_factory=list)  # 数据采集阶段 LLM 扩展的关键词
+    extracted_images: List[Dict[str, Any]] = Field(default_factory=list)  # 从网页提取的截图列表
 
 # ============================================================
 # Cleaner（清洗）阶段
