@@ -37,6 +37,9 @@ class LayoutType(str, Enum):
     IMAGE_HERO = "image_hero"         # 大图背景
     IMAGE_GRID = "image_grid"         # 图片网格
     STAT_HIGHLIGHT = "stat"           # 大数字
+    CHART_BAR = "chart_bar"           # 柱状图
+    CHART_LINE = "chart_line"         # 折线图
+    CHART_PIE = "chart_pie"           # 饼图
     THANKS = "thanks"                 # 结尾致谢
 
 
@@ -64,6 +67,7 @@ class HTMLPageModel(BaseModel):
     image_blocks: List[HTMLImageBlock] = Field(default_factory=list)
     kpi_metrics: List[Dict[str, Any]] = Field(default_factory=list)
     table_data: Optional[Dict[str, Any]] = None
+    chart_data: Optional[Dict[str, Any]] = None  # Chart.js 图表配置
     notes: str = ""  # 演讲者备注（runtime.js 的 S 键可见）
 
 
@@ -137,6 +141,7 @@ class HTMLReportGenerator:
 <link rel="stylesheet" href="{self._assets_relpath()}/base.css">
 <link rel="stylesheet" id="theme-link" href="{self._assets_relpath()}/themes/{self.theme}.css">
 <link rel="stylesheet" href="{self._assets_relpath()}/animations/animations.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* === 单 deck 私有样式 === */
 body {{ background: var(--bg); }}
@@ -279,6 +284,9 @@ body {{ background: var(--bg); }}
             LayoutType.IMAGE_GRID: self._render_image_grid,
             LayoutType.STAT_HIGHLIGHT: self._render_stat,
             LayoutType.THANKS: self._render_thanks,
+            LayoutType.CHART_BAR: self._render_chart_page,
+            LayoutType.CHART_LINE: self._render_chart_page,
+            LayoutType.CHART_PIE: self._render_chart_page,
             LayoutType.CONTENT: self._render_content,
         }
         renderer = renderers.get(page.layout, self._render_content)
@@ -694,6 +702,79 @@ body {{ background: var(--bg); }}
     <span class="slide-number" data-current="{idx + 1}" data-total="{total}"></span>
   </div>'''
 
+        return self._wrap_slide(page, idx, total, body)
+
+    def _render_chart_page(self, page: HTMLPageModel, idx: int, total: int) -> str:
+        """Chart.js 图表页（柱状图 / 折线图 / 饼图）"""
+        title = self._esc(page.title)
+        kicker = self._esc(page.kicker or "Chart")
+
+        if not page.chart_data:
+            return self._render_content(page, idx, total)
+
+        chart_type_map = {
+            LayoutType.CHART_BAR: "bar",
+            LayoutType.CHART_LINE: "line",
+            LayoutType.CHART_PIE: "pie",
+        }
+        chart_type = chart_type_map.get(page.layout, "bar")
+
+        labels = page.chart_data.get("labels", [])
+        datasets_cfg = page.chart_data.get("datasets", [])
+        labels_js = ",".join("'" + self._esc(str(l)) + "'" for l in labels)
+
+        datasets_js_parts = []
+        for ds in datasets_cfg:
+            data_str = ",".join(str(v) for v in ds.get("data", []))
+            label_esc = self._esc(ds.get("label", ""))
+            if chart_type == "pie":
+                datasets_js_parts.append(
+                    "{data:[" + data_str + "],backgroundColor:accent}"
+                )
+            else:
+                datasets_js_parts.append(
+                    "{label:'" + label_esc + "',data:[" + data_str + "],backgroundColor:accent,borderRadius:6}"
+                )
+        datasets_js = ",".join(datasets_js_parts)
+
+        if chart_type == "pie":
+            options_js = "{plugins:{legend:{labels:{color:text2}}}}"
+        else:
+            options_js = (
+                "{plugins:{legend:{labels:{color:text2}}}"
+                ",scales:{x:{ticks:{color:text2},grid:{color:border}}"
+                ",y:{ticks:{color:text2},grid:{color:border}}}}"
+            )
+
+        chart_id = "chart_" + str(idx)
+
+        chart_script = (
+            "addEventListener('DOMContentLoaded',()=>{"
+            "const css=getComputedStyle(document.documentElement);"
+            "const accent=css.getPropertyValue('--accent').trim();"
+            "const text2=css.getPropertyValue('--text-2').trim();"
+            "const border=css.getPropertyValue('--border').trim();"
+            "new Chart(document.getElementById('" + chart_id + "'),{type:'" + chart_type + "',"
+            "data:{labels:[" + labels_js + "],"
+            "datasets:[" + datasets_js + "]},"
+            "options:" + options_js + "});"
+            "});"
+        )
+
+        body = (
+            '<p class="kicker">' + kicker + '</p>\n'
+            '  <h2 class="h2">' + title + '</h2>\n'
+            '  <div class="card mt-l" style="height:520px;padding:28px">\n'
+            '    <canvas id="' + chart_id + '"></canvas>\n'
+            '  </div>\n'
+            '  <script>\n'
+            '    ' + chart_script + '\n'
+            '  </script>\n'
+            '  <div class="deck-footer">\n'
+            '    <span class="dim2">' + kicker + '</span>\n'
+            '    <span class="slide-number" data-current="' + str(idx + 1) + '" data-total="' + str(total) + '"></span>\n'
+            '  </div>'
+        )
         return self._wrap_slide(page, idx, total, body)
 
 
