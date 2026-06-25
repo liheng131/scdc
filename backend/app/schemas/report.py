@@ -26,6 +26,12 @@ class ReportCreate(BaseModel):
     storage_ref: Optional[str] = None
     images: Optional[List[ReportImageItem]] = None
     chart_images: Optional[List[Dict[str, Any]]] = None  # [{"title": str, "base64": str, "section"?: str, "position"?: int}]
+    # ---- html-ppt 字段（Phase 1 新增）----
+    page_model: Optional[List[Dict[str, Any]]] = None
+    theme: Optional[str] = "minimal-white"
+    notes_summary: Optional[str] = None
+    # 完整 HTML 演示文稿内容（html-ppt 设计系统生成）
+    html_content: Optional[str] = None
 
 class ReportUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)
@@ -51,6 +57,11 @@ class ReportOut(BaseModel):
     vector_uploaded_at: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # ---- html-ppt 字段（Phase 1 新增）----
+    page_model: Optional[List[dict]] = None
+    theme: Optional[str] = "minimal-white"
+    notes_summary: Optional[str] = None
+    html_content: Optional[str] = None
 
 class ReportStatisticsItem(BaseModel):
     label: str

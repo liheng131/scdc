@@ -96,14 +96,20 @@ class ReportService:
             storage_ref=report_in.storage_ref,
             images=report_in.chart_images if report_in.chart_images else [],  # NEW: persist chart_images
             pending_vector_upload=True,  # NEW: lazy 模式默认待写入
+            # html-ppt Phase 1: 结构化页面 + 主题 + 摘要
+            page_model=report_in.page_model if report_in.page_model else None,
+            theme=report_in.theme or "minimal-white",
+            notes_summary=report_in.notes_summary if report_in.notes_summary else None,
+            html_content=report_in.html_content if report_in.html_content else None,
         )
         session.add(r)
         await session.commit()
         await session.refresh(r)
         # 调试日志:验证图片数据是否成功写入 DB
         logger.info(
-            "[DEBUG][report] create_report id=%s task_id=%s images_count=%d",
+            "[DEBUG][report] create_report id=%s task_id=%s images_count=%d, page_model=%d, theme=%s",
             r.id, r.task_id, len(r.images or []),
+            len(r.page_model or []), r.theme or "minimal-white",
         )
         # 注意：lazy 模式下不在此处触发 Milvus 写入
         return r
@@ -196,6 +202,12 @@ class ReportService:
         summary: Optional[str] = None,
         chart_images: Optional[List[Dict[str, Any]]] = None,
         dimension_illustrations: Optional[List[Dict[str, Any]]] = None,
+        # html-ppt Phase 1: 结构化页面 + 主题 + 摘要
+        page_model: Optional[List[Dict[str, Any]]] = None,
+        theme: Optional[str] = None,
+        notes_summary: Optional[str] = None,
+        # html-ppt Phase 2: 完整 HTML 演示文稿
+        html_content: Optional[str] = None,
     ) -> Report:
         # 合并 chart_images 和 dimension_illustrations
         all_images = []
@@ -215,11 +227,14 @@ class ReportService:
         # 调试日志:记录合并后图片数量
         logger.info(
             "[DEBUG][report] create_from_workflow task_id=%s "
-            "chart_images=%d, dimension_illustrations=%d, merged_all_images=%d",
+            "chart_images=%d, dimension_illustrations=%d, merged_all_images=%d, page_model=%d, theme=%s, html_content=%d",
             task_id,
             len(chart_images or []),
             len(dimension_illustrations or []),
             len(all_images),
+            len(page_model or []),
+            theme or "minimal-white",
+            len(html_content or ""),
         )
 
         report_in = ReportCreate(
@@ -229,6 +244,12 @@ class ReportService:
             content_markdown=content_markdown,
             summary=summary or (content_markdown[:200] if content_markdown else None),
             chart_images=all_images,
+            # html-ppt Phase 1
+            page_model=page_model,
+            theme=theme or "minimal-white",
+            notes_summary=notes_summary,
+            # html-ppt Phase 2
+            html_content=html_content,
         )
         return await self.create_report(session, report_in)
 
@@ -1135,6 +1156,268 @@ class ReportService:
         body = f"# {report.title}\n\n## 📑 执行摘要\n{summary}\n\n---\n\n## 详细内容\n{enhanced_content or content}"
         return body.encode("utf-8")
 
+    async def export_report_with_html_pipeline(
+        self, session: AsyncSession, report_id: int, fmt: str, 
+        page_model: ReportPageModel, template_id: Optional[str] = None
+    ) -> Tuple[str, str, bytes]:
+        """
+        使用 HTML 生成流程导出报告
+        
+        新流程：
+        1. 将 ReportPageModel 转换为 HTML
+        2. 根据目标格式，将 HTML 转换为对应格式
+        
+        Args:
+            session: 数据库会话
+            report_id: 报告 ID
+            fmt: 导出格式（pptx/pdf/docx/md）
+            page_model: 带有布局信息的 ReportPageModel
+            template_id: PPT 模板 ID（可选）
+            
+        Returns:
+            (文件名, MIME类型, 文件二进制内容)
+        """
+        r = await self.get_report(session, report_id)
+        if not r:
+            raise ValueError("Report not found")
+        
+        fmt = fmt.lower()
+        
+        # 1. 将 ReportPageModel 转换为 HTMLPageModel 并生成 HTML
+        from app.services.html_report_generator import (
+            HTMLReportGenerator, HTMLPageModel, HTMLTextBlock, HTMLImageBlock, LayoutType,
+        )
+        html_pages = self._convert_pages_to_html(page_model.pages)
+        generator = HTMLReportGenerator()
+        html_content = generator.generate(html_pages)
+        
+        logger.info(f"HTML generated for report {report_id}: {len(html_content)} chars")
+        
+        # 2. 根据格式转换为对应格式
+        if fmt == "pptx":
+            from app.services.html_to_ppt_converter import HTMLToPPTConverter
+            converter = HTMLToPPTConverter()
+            
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            try:
+                await converter.convert(html_content, tmp_path, template_id)
+                with open(tmp_path, 'rb') as f:
+                    data = f.read()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+            result = (
+                f"report_{r.id}.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                data
+            )
+        
+        elif fmt == "pdf":
+            from app.services.html_to_pdf_converter import HTMLToPDFConverter
+            converter = HTMLToPDFConverter()
+            
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            try:
+                await converter.convert(html_content, tmp_path)
+                with open(tmp_path, 'rb') as f:
+                    data = f.read()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+            result = (
+                f"report_{r.id}.pdf",
+                "application/pdf",
+                data
+            )
+        
+        elif fmt == "docx":
+            from app.services.html_to_docx_converter import HTMLToDOCXConverter
+            converter = HTMLToDOCXConverter()
+            
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            try:
+                await converter.convert(html_content, tmp_path)
+                with open(tmp_path, 'rb') as f:
+                    data = f.read()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+            result = (
+                f"report_{r.id}.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                data
+            )
+        
+        elif fmt in ("md", "markdown"):
+            from app.services.html_to_markdown_converter import HTMLToMarkdownConverter
+            converter = HTMLToMarkdownConverter()
+            
+            with tempfile.NamedTemporaryFile(suffix='.md', delete=False, mode='w', encoding='utf-8') as tmp:
+                tmp_path = tmp.name
+            
+            try:
+                await converter.convert(html_content, tmp_path)
+                with open(tmp_path, 'r', encoding='utf-8') as f:
+                    data = f.read().encode('utf-8')
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+            result = (
+                f"report_{r.id}.md",
+                "text/markdown",
+                data
+            )
+        
+        else:
+            raise ValueError(f"Unsupported format: {fmt}")
+        
+        logger.info(f"Report {report_id} exported as {fmt} using HTML pipeline")
+        return result
+    
+    def _choose_layout(self, page: PageModel) -> "LayoutType":
+        """单点布局决策 —— 整条 HTML 流程中唯一决定 layout 的地方
+
+        决策优先级（从高到低）：
+        1. page_type 显式标记 (cover / section / toc)
+        2. 页面内容特征（tables / images 数量 / text_blocks 数量）
+        3. factory 默认 layout_hint 兜底
+
+        LayoutType 与 html-ppt 布局的对应关系：
+        - cover / section  →  COVER (渐变大标题) / SECTION (章节封面)
+        - toc              →  TOC (目录卡片网格)
+        - kpi 指标         →  KPI_GRID
+        - 单张大图         →  IMAGE_HERO
+        - 多图             →  IMAGE_GRID
+        - 表格             →  TABLE
+        - 图文             →  CONTENT (左文右图)
+        """
+        from app.services.html_report_generator import LayoutType
+
+        # 1) page_type 优先 —— 业务语义强
+        if page.page_type == "cover":
+            return LayoutType.COVER
+        if page.page_type == "section":
+            return LayoutType.SECTION
+        if page.page_type == "toc":
+            return LayoutType.TOC
+        if page.page_type == "summary":
+            return LayoutType.THREE_COLUMN  # 总结页用三栏
+
+        # 2) 内容特征
+        if page.tables:
+            return LayoutType.TABLE
+        # 检测文本块里内嵌的 markdown 表格（"| --- |" 形式）
+        has_inline_table = any(
+            "|" in (tb.text or "") and "---" in (tb.text or "")
+            for tb in page.text_blocks
+        )
+        if has_inline_table:
+            return LayoutType.TABLE
+
+        image_count = len(page.images)
+        text_block_count = len(page.text_blocks)
+        if image_count >= 4:
+            return LayoutType.IMAGE_GRID
+        if image_count >= 1 and text_block_count <= 1:
+            return LayoutType.IMAGE_HERO
+        if image_count > 0 and text_block_count <= 2:
+            return LayoutType.TWO_COLUMN
+        if image_count > 0 and text_block_count > 2:
+            return LayoutType.CONTENT
+
+        # 3) factory 默认 layout_hint 兜底
+        hint_fallback = {
+            "image_only": LayoutType.IMAGE_GRID,
+            "text_left": LayoutType.TWO_COLUMN,
+            "text_only": LayoutType.CONTENT,
+            "text_top": LayoutType.CONTENT,
+        }
+        return hint_fallback.get(
+            page.layout_hint, LayoutType.CONTENT,
+        )
+
+    def _convert_pages_to_html(self, pages: List[PageModel]) -> List:
+        """将 report_page_model.PageModel 列表转换为 html_report_generator.HTMLPageModel 列表
+
+        Args:
+            pages: report_page_model.PageModel 列表
+
+        Returns:
+            html_report_generator.HTMLPageModel 列表
+        """
+        from app.services.html_report_generator import (
+            HTMLPageModel, HTMLTextBlock, HTMLImageBlock, LayoutType,
+        )
+
+        html_pages = []
+        for page in pages:
+            # 转换文本块（过滤掉与 page.title 重复的 TextBlock，
+            # 因为 make_content_page / make_summary_page 会把标题写入 text_blocks[0]，
+            # 而 HTML 渲染器已经用 <h2>{page.title}</h2> 单独渲染标题）
+            text_blocks = []
+            for tb in page.text_blocks:
+                if tb.text.strip() == page.title.strip():
+                    continue
+                text_blocks.append(HTMLTextBlock(
+                    text=tb.text,
+                    emphasis=[],  # PageModel 没有 emphasis 字段，留空
+                ))
+
+            # 转换图片块
+            image_blocks = []
+            for img in page.images:
+                # PageModel.ImageBlock 使用 base64，HTMLImageBlock 使用 url
+                # 将 base64 转换为 data URL
+                if img.base64:
+                    url = f"data:image/png;base64,{img.base64}"
+                    image_blocks.append(HTMLImageBlock(
+                        url=url,
+                        caption=img.alt or "",
+                        source="matplotlib",
+                    ))
+
+            # 转换表格数据（取第一个表格；HTML 渲染器目前只支持单表格）
+            table_data = None
+            if page.tables:
+                tbl = page.tables[0]
+                table_data = {
+                    "headers": tbl.headers,
+                    "rows": tbl.rows,
+                }
+
+            # 单点布局决策（不再依赖 _enhance_layout_info 写入的 layout_hint 字符串）
+            layout = self._choose_layout(page)
+
+            # 生成 kicker：封面用 subtitle，section 页用编号，其他留空
+            kicker = ""
+            if page.page_type == "cover":
+                kicker = page.subtitle
+            elif page.page_type == "section":
+                kicker = f"{page.section_number:02d} / {page.title}"
+
+            html_page = HTMLPageModel(
+                title=page.title,
+                layout=layout,
+                kicker=kicker,
+                text_blocks=text_blocks,
+                image_blocks=image_blocks,
+                kpi_metrics=[],
+                table_data=table_data,
+            )
+            html_pages.append(html_page)
+
+        return html_pages
+    
     async def export_report(
         self, session: AsyncSession, report_id: int, fmt: str, template_id: Optional[str] = None
     ) -> Tuple[str, str, bytes]:

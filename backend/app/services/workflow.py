@@ -484,6 +484,12 @@ class WorkflowService:
                 "chart_images": reporter.chart_images if reporter else [],
                 "dimension_illustrations": reporter.dimension_illustrations if reporter else [],
                 "sections": [{"title": s.title, "content": s.content} for s in (reporter.sections if reporter else [])],
+                # html-ppt Phase 1: 结构化页面 + 主题 + 摘要
+                "page_model": reporter.pages if reporter and reporter.pages else [],
+                "theme": reporter.theme if reporter and reporter.theme else "minimal-white",
+                "notes_summary": reporter.notes_summary if reporter and reporter.notes_summary else "",
+                # html-ppt Phase 2: 完整 HTML 演示文稿
+                "html_content": reporter.html_content if reporter and reporter.html_content else "",
             }
             state.stages = {
                 "collecting": {"item_count": orch_output.collected_count},
@@ -523,9 +529,20 @@ class WorkflowService:
                             summary=report_data.get("report_markdown", "")[:200] if report_data.get("report_markdown") else None,
                             chart_images=chart_images,
                             dimension_illustrations=dimension_illustrations,
+                            # html-ppt Phase 1: 结构化页面 + 主题 + 摘要
+                            page_model=report_data.get("page_model"),
+                            theme=report_data.get("theme"),
+                            notes_summary=report_data.get("notes_summary"),
+                            # html-ppt Phase 2: 完整 HTML 演示文稿
+                            html_content=report_data.get("html_content", ""),
                         )
                         report_id = report.id
-                        logger.info("Auto-saved report for workflow %s, report_id=%s", state.workflow_id, report_id)
+                        logger.info(
+                            "Auto-saved report for workflow %s, report_id=%s, pages=%d, theme=%s",
+                            state.workflow_id, report_id,
+                            len(report_data.get("page_model") or []),
+                            report_data.get("theme") or "minimal-white",
+                        )
             except Exception as e:
                 logger.warning("Failed to auto-save report for workflow %s: %s", state.workflow_id, e)
 
@@ -601,8 +618,45 @@ class WorkflowService:
             })
 
             try:
+                # 对于耗时较长的阶段（analyzing），并发发送进度心跳
+                progress_events: list = []
+                stage_done = asyncio.Event()
+
+                async def _emit_progress():
+                    """后台任务：每 20 秒发送一次进度心跳"""
+                    elapsed = 0
+                    while not stage_done.is_set():
+                        await asyncio.sleep(20)
+                        if stage_done.is_set():
+                            break
+                        elapsed += 20
+                        progress_events.append(self._sse("stage_progress", {
+                            "stage": stage,
+                            "label": STAGE_LABELS[stage],
+                            "message": f"{STAGE_LABELS[stage]}进行中，已耗时 {elapsed} 秒，请耐心等待...",
+                            "elapsed_seconds": elapsed,
+                        }))
+
+                if stage == "analyzing":
+                    progress_task = asyncio.create_task(_emit_progress())
+                else:
+                    progress_task = None
+
                 # 跑当前阶段
                 stage_output, raw_output = await self._run_single_stage(state, stage)
+
+                # 停止进度心跳
+                stage_done.set()
+                if progress_task:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # 发出累积的进度事件
+                for ev in progress_events:
+                    yield ev
 
                 # 写 stages 摘要
                 existing = state.stages.get(stage, {}) if state.stages else {}
@@ -737,6 +791,7 @@ class WorkflowService:
             "chart_images": reporting_raw.get("chart_images", []),
             "sections": reporting_raw.get("sections", []),
             "dimension_illustrations": reporting_raw.get("dimension_illustrations", []),
+            "html_content": reporting_raw.get("html_content", ""),
         }
         await self._persist_stage_update(state)
 
@@ -766,6 +821,12 @@ class WorkflowService:
                         summary=(state.result.get("report_markdown", "")[:200] if state.result.get("report_markdown") else None),
                         chart_images=chart_images,
                         dimension_illustrations=dimension_illustrations,
+                        # html-ppt Phase 1: 结构化页面 + 主题 + 摘要
+                        page_model=state.result.get("page_model"),
+                        theme=state.result.get("theme"),
+                        notes_summary=state.result.get("notes_summary"),
+                        # html-ppt Phase 2: 完整 HTML 演示文稿
+                        html_content=state.result.get("html_content", ""),
                     )
                     report_id = report.id
         except Exception as e:
@@ -1009,6 +1070,12 @@ class WorkflowService:
             "chart_configs": rep_out.chart_configs,
             "chart_images": rep_out.chart_images,
             "dimension_illustrations": rep_out.dimension_illustrations,
+            # html-ppt Phase 1: ReporterAgent 直接产出的结构化 PageModel 列表
+            "page_model": rep_out.pages or [],
+            "theme": rep_out.theme or "minimal-white",
+            "notes_summary": rep_out.notes_summary or "",
+            # html-ppt Phase 2: 完整 HTML 演示文稿
+            "html_content": rep_out.html_content or "",
         }
         return stage_output, raw_output
 
