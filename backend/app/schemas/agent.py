@@ -197,6 +197,14 @@ class ReporterInput(BaseModel):
     source_contents: List[Dict[str, Any]] = []
     dimensions: List[str] = Field(default_factory=list)
     conversation_history: List[ConversationMessage] = Field(default_factory=list)
+    user_images: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="用户上传的图片列表，每项包含 base64 编码数据和可选的 caption",
+    )
+    web_images: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="从网页提取的截图列表，每项包含 base64 编码数据、source_url 和可选的 caption",
+    )
 
 class ReportSection(BaseModel):
     title: str

@@ -357,6 +357,7 @@ class OrchestratorAgent:
                     include_charts=input_data.include_charts,
                     dimensions=dynamic_dims,
                     source_contents=source_contents,
+                    web_images=col_out.extracted_images or [],
                 )
                 rep_out = await self.reporter.execute(rep_in)
                 if not rep_out.success:
@@ -457,10 +458,11 @@ class OrchestratorAgent:
                     })
                 rep_topic = f"{topic}\n\n报告生成额外要求: {reentry_context}" if reentry_context else topic
                 rep_in = ReporterInput(
-                    task_id=task_id, topic=rep_topic, analyzer_output=ana_out,
+                    task_id=task_id, topic=topic, analyzer_output=ana_out,
                     include_charts=input_data.include_charts,
-                    dimensions=input_data.dimensions,
+                    dimensions=dynamic_dims,
                     source_contents=source_contents,
+                    web_images=col_out.extracted_images or [],
                 )
                 rep_out = await self.reporter.execute(rep_in)
                 if not rep_out.success:

@@ -1479,16 +1479,23 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         dimensions: List[str],
         structured_metrics: Optional[List[Any]] = None,
         theme: Optional[str] = None,
+        user_images: Optional[List[Dict[str, Any]]] = None,
+        web_images: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Build a complete HTML report using the html-ppt design system.
 
         Generates a full presentation with cover, TOC, executive summary,
         dimension analysis pages, and thanks page.
+
+        Args:
+            user_images: List of dicts with 'base64' and optional 'caption' keys
+            web_images: List of dicts with 'base64', 'source_url', and optional 'caption' keys
         """
         from app.services.html_report_generator import (
             HTMLReportGenerator,
             HTMLPageModel,
             HTMLTextBlock,
+            HTMLImageBlock,
             LayoutType,
         )
         from app.services.theme_selector import theme_selector
@@ -1607,7 +1614,34 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                     text_blocks=[HTMLTextBlock(text="Insufficient data for this dimension.")],
                 ))
 
-        # 5) Thanks page
+        # 5) User and web images gallery
+        all_images: List[HTMLImageBlock] = []
+        for img in (user_images or []):
+            b64 = img.get("base64", "")
+            if b64:
+                all_images.append(HTMLImageBlock(
+                    url=f"data:image/png;base64,{b64}",
+                    caption=img.get("caption", ""),
+                    source="user_upload",
+                ))
+        for img in (web_images or []):
+            b64 = img.get("base64", "")
+            if b64:
+                all_images.append(HTMLImageBlock(
+                    url=f"data:image/png;base64,{b64}",
+                    caption=img.get("caption", "") or img.get("title", ""),
+                    source=img.get("source_url", ""),
+                ))
+        if all_images:
+            pages.append(HTMLPageModel(
+                title="参考图片",
+                layout=LayoutType.IMAGE_GRID,
+                kicker="Gallery",
+                image_blocks=all_images,
+                notes="用户上传及网页提取的参考图片",
+            ))
+
+        # 6) Thanks page
         pages.append(HTMLPageModel(
             title="Thank You",
             layout=LayoutType.THANKS,
@@ -1739,6 +1773,8 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                             dimensions=dims_for_html,
                             structured_metrics=input_data.analyzer_output.structured_metrics,
                             theme=extracted_theme,
+                            user_images=input_data.user_images,
+                            web_images=input_data.web_images,
                         )
                         logger.info(f"HTML report generated ({len(html_content)} chars)")
                     except Exception as e:
@@ -1817,6 +1853,8 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 insights=insights,
                 dimensions=dims_for_html,
                 structured_metrics=input_data.analyzer_output.structured_metrics,
+                user_images=input_data.user_images,
+                web_images=input_data.web_images,
             )
             logger.info(f"HTML report generated for template path ({len(html_content)} chars)")
         except Exception as e:

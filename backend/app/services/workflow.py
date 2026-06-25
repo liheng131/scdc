@@ -916,6 +916,7 @@ class WorkflowService:
             "item_count": len(sources),
             "warning": col_out.warning,
             "metadata": col_out.metadata or {},
+            "extracted_images": col_out.extracted_images or [],
         }
         return stage_output, raw_output
 
@@ -1020,6 +1021,10 @@ class WorkflowService:
                 "content": full_text[:1000],
             })
 
+        # 从 collecting 阶段获取网页提取的截图
+        collecting_raw = (state.stages.get("collecting", {}) or {}).get("_raw", {})
+        web_images = collecting_raw.get("extracted_images", [])
+
         reporter = ReporterAgent()
         rep_in = ReporterInput(
             task_id=state.workflow_id,
@@ -1028,6 +1033,7 @@ class WorkflowService:
             include_charts=True,
             dimensions=state.dimensions or [],
             source_contents=source_contents,
+            web_images=web_images,
         )
         rep_out = await reporter.execute(rep_in)
         if not rep_out.success:
