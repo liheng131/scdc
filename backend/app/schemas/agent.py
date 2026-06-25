@@ -228,6 +228,10 @@ class ReporterOutput(BaseModel):
         default="",
         description="整份报告的 150 字以内执行摘要（演讲者模式开篇用）",
     )
+    html_content: str = Field(
+        default="",
+        description="完整的 HTML 演示文稿内容（基于 html-ppt 设计系统生成）",
+    )
     # ---- 兼容字段 ----
     error: Optional[str] = None
     degraded: bool = False

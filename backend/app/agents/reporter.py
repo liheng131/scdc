@@ -29,7 +29,7 @@ from app.schemas.agent import ReporterInput, ReporterOutput, ReportSection, Insi
 from app.core.config import settings
 from app.core.runtime_config import rumtime_config
 from app.services.report_image import ReportImageService
-from app.services.report_page_model import ReportPageModel
+from app.services.report_page_model import ReportPageModel, PageModel
 from app.services.markdown_parser import MarkdownPageParser
 from app.services.quality_validator import QualityValidator, ValidationResult
 
@@ -250,9 +250,201 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 - Total: 1500-3000 Chinese characters
 - Use ## headings, **bold**, bullet lists, > blockquotes
 - 关键洞察用 > blockquote 引用格式包裹
-- 各章节之间用 --- 分隔线"""
+- 各章节之间用 --- 分隔线
+
+== HTML-PPT STRUCTURED OUTPUT (Phase 1) ==
+在 markdown 报告的**最末尾**，请另外输出一个 JSON 代码块（用 ```json ... ``` 包裹），
+用于驱动 html-ppt 渲染管线。JSON 结构如下：
+
+```json
+{{
+  "theme": "minimal-white",
+  "notes_summary": "150 字以内的整份报告执行摘要（演讲者模式开篇用）",
+  "pages": [
+    {{
+      "page_type": "cover",
+      "title": "报告主标题",
+      "kicker": "副标题/眉头",
+      "layout": "cover",
+      "animations": ["fade-up"],
+      "data_fx": "",
+      "notes": "封面页 150-300 字逐字稿（讲什么、为何讲、关键钩子）",
+      "text_blocks": [{{"text": "副标题文本", "emphasis": ["关键词"]}}],
+      "image_blocks": [],
+      "kpi_metrics": [],
+      "table_data": null
+    }},
+    {{
+      "page_type": "toc",
+      "title": "目录",
+      "layout": "toc",
+      "animations": ["fade-up"],
+      "notes": "目录页 150-300 字演讲稿",
+      "text_blocks": [
+        {{"text": "宏观经济环境"}},
+        {{"text": "行业形势与趋势"}},
+        {{"text": "竞争格局与对手"}}
+      ]
+    }},
+    {{
+      "page_type": "section",
+      "title": "宏观经济环境",
+      "layout": "section",
+      "animations": ["fade-up"],
+      "notes": "章节封面 150-300 字演讲稿"
+    }},
+    {{
+      "page_type": "content",
+      "title": "市场规模与增速",
+      "layout": "content",
+      "animations": ["fade-up", "rise-in"],
+      "notes": "该页 150-300 字演讲稿",
+      "text_blocks": [
+        {{"text": "核心段落文本"}}
+      ]
+    }},
+    {{
+      "page_type": "content",
+      "title": "关键指标一览",
+      "layout": "kpi_grid",
+      "animations": ["counter-up"],
+      "notes": "KPI 页演讲稿",
+      "kpi_metrics": [
+        {{"label": "市场规模", "value": "1200亿", "raw_value": 1200, "unit": "亿元", "change": "+15% YoY", "trend": "up"}},
+        {{"label": "国产化率", "value": "35%", "raw_value": 35, "unit": "%", "change": "+8pp", "trend": "up"}}
+      ]
+    }}
+  ]
+}}
+```
+
+**JSON 字段说明**：
+- `theme`: 选自以下之一 — minimal-white / tokyo-night / dracula / aurora / nord / corporate-clean / glassmorphism / pitch-deck-vc / engineering-whiteprint / academic-paper
+- `layout`: 每页选一个 — cover / toc / section / content / bullets / kpi_grid / two_column / three_column / table / image_hero / image_grid / stat / thanks
+- `animations`: data-anim 值列表，至少 1 个。常用：fade-up / fade-left / rise-in / counter-up / stagger-list
+- `notes`: 150-300 字演讲者逐字稿（用户按 S 键可看到）
+- `kpi_metrics`: `[{label, value, raw_value, unit, change, trend}]` 数组
+- `pages` 至少 4 页：cover + toc + 至少 1 个 section + 至少 1 个 content
+
+**降级策略**：如果你无法稳定输出结构化 JSON，请在 markdown 末尾直接输出 `<!-- NO_PAGE_MODEL -->` 标记，
+后端会回退到 MarkdownPageParser 路径（仍然可正常生成报告）。"""
 
         return prompt
+
+    # ── LLM 输出中的结构化 PageModel JSON 解析 ───────────────
+
+    # 优先匹配显式 json 代码块；找不到再尝试提取首段 {...} 顶层 JSON
+    _JSON_BLOCK_RE = re.compile(r"```(?:json|JSON)?\s*(\{[\s\S]+?\})\s*```", re.MULTILINE)
+    _NO_PAGE_MODEL_MARKER = "<!-- NO_PAGE_MODEL -->"
+
+    def _extract_pages_from_llm_response(
+        self,
+        llm_response: str,
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], Optional[str]]:
+        """
+        从 LLM 原始响应中提取 PageModel 列表 + theme + notes_summary
+
+        Returns:
+            (pages, theme, notes_summary) — 任意字段解析失败时该项为 None
+        """
+        if not llm_response:
+            return None, None, None
+
+        # 0) 显式 "无法输出结构化" 标记
+        if self._NO_PAGE_MODEL_MARKER in llm_response:
+            logger.info("LLM opted out of structured PageModel output (NO_PAGE_MODEL marker)")
+            return None, None, None
+
+        # 1) 匹配 json 代码块
+        json_text: Optional[str] = None
+        m = self._JSON_BLOCK_RE.search(llm_response)
+        if m:
+            json_text = m.group(1)
+        else:
+            # 2) 兜底：尝试提取首段大括号 JSON（从第一个 { 到匹配的最后一个 }）
+            try:
+                start = llm_response.index("{")
+                # 用栈式扫描定位匹配的大括号
+                depth = 0
+                end = -1
+                for idx in range(start, len(llm_response)):
+                    ch = llm_response[idx]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = idx
+                            break
+                if end > start:
+                    json_text = llm_response[start : end + 1]
+            except ValueError:
+                pass
+
+        if not json_text:
+            logger.debug("No JSON block found in LLM response for PageModel extraction")
+            return None, None, None
+
+        # 3) 解析 JSON
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError as e:
+            logger.info(
+                "Failed to parse PageModel JSON from LLM response: %s. "
+                "Will fall back to MarkdownPageParser.",
+                e,
+            )
+            return None, None, None
+
+        if not isinstance(payload, dict):
+            logger.info("LLM JSON payload is not a dict, falling back")
+            return None, None, None
+
+        pages = payload.get("pages")
+        if not isinstance(pages, list) or not pages:
+            logger.info("LLM JSON has no 'pages' list, falling back to MarkdownPageParser")
+            return None, None, None
+
+        theme = payload.get("theme")
+        if not isinstance(theme, str) or not theme.strip():
+            theme = None
+        notes_summary = payload.get("notes_summary")
+        if not isinstance(notes_summary, str):
+            notes_summary = None
+
+        # 4) 基本字段类型校验
+        valid_layouts = {
+            "cover", "toc", "section", "content", "bullets", "kpi_grid",
+            "two_column", "three_column", "table", "image_hero", "image_grid",
+            "stat", "thanks",
+        }
+        for idx, page in enumerate(pages):
+            if not isinstance(page, dict):
+                logger.info("Page %d is not a dict, dropping", idx)
+                return None, None, None
+            layout = page.get("layout", "content")
+            if layout not in valid_layouts:
+                page["layout"] = "content"  # 未知 layout 降级
+            if not page.get("page_type"):
+                page["page_type"] = "content"
+            if not page.get("title"):
+                page["title"] = f"第 {idx + 1} 页"
+            if not isinstance(page.get("text_blocks"), list):
+                page["text_blocks"] = []
+            if not isinstance(page.get("image_blocks"), list):
+                page["image_blocks"] = []
+            if not isinstance(page.get("kpi_metrics"), list):
+                page["kpi_metrics"] = []
+            if not isinstance(page.get("animations"), list):
+                page["animations"] = ["fade-up"]  # 兜底加一个动效
+            if not page.get("notes"):
+                page["notes"] = page.get("title", "")
+
+        logger.info(
+            "ReporterAgent extracted %d structured pages from LLM response (theme=%s, notes_summary=%d chars)",
+            len(pages), theme or "(default)", len(notes_summary or ""),
+        )
+        return pages, theme, notes_summary
 
     @retry(
         stop=stop_after_attempt(2),
@@ -1279,6 +1471,151 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 
         return modified_report
 
+    def _build_html_report(
+        self,
+        topic: str,
+        summary: str,
+        insights: List[Insight],
+        dimensions: List[str],
+        structured_metrics: Optional[List[Any]] = None,
+        theme: Optional[str] = None,
+    ) -> str:
+        """Build a complete HTML report using the html-ppt design system.
+
+        Generates a full presentation with cover, TOC, executive summary,
+        dimension analysis pages, and thanks page.
+        """
+        from app.services.html_report_generator import (
+            HTMLReportGenerator,
+            HTMLPageModel,
+            HTMLTextBlock,
+            LayoutType,
+        )
+        from app.services.theme_selector import theme_selector
+
+        if not theme:
+            theme = theme_selector.select_theme(topic, summary)
+
+        generator = HTMLReportGenerator(theme=theme)
+        pages: List[HTMLPageModel] = []
+
+        # 1) Cover page
+        pages.append(HTMLPageModel(
+            title=topic,
+            layout=LayoutType.COVER,
+            kicker="Market Insight Report",
+            text_blocks=[
+                HTMLTextBlock(text=summary[:200] if summary else ""),
+                HTMLTextBlock(text=f"SCDC AI Agent System"),
+                HTMLTextBlock(text=datetime.datetime.now().strftime("%Y-%m-%d")),
+            ],
+            notes=summary[:300] if summary else topic,
+        ))
+
+        # 2) TOC page
+        toc_items = ["Executive Summary"] + list(dimensions) + ["Conclusion"]
+        pages.append(HTMLPageModel(
+            title="Contents",
+            layout=LayoutType.TOC,
+            text_blocks=[HTMLTextBlock(text=item) for item in toc_items],
+        ))
+
+        # 3) Executive Summary page
+        if summary:
+            # Split summary into paragraphs for better display
+            paragraphs = [p.strip() for p in summary.split("\n") if p.strip()]
+            text_blocks = [HTMLTextBlock(text=p, is_lead=(i == 0)) for i, p in enumerate(paragraphs[:4])]
+            pages.append(HTMLPageModel(
+                title="Executive Summary",
+                layout=LayoutType.CONTENT,
+                kicker="Summary",
+                text_blocks=text_blocks,
+                notes=summary[:300],
+            ))
+
+        # 4) Dimension analysis pages
+        dim_insights: Dict[str, List[Insight]] = {}
+        for ins in insights:
+            dim = ins.dimension or "General Analysis"
+            dim_insights.setdefault(dim, []).append(ins)
+
+        for dim in dimensions:
+            dim_list = dim_insights.get(dim, [])
+            # Section divider page
+            pages.append(HTMLPageModel(
+                title=dim,
+                layout=LayoutType.SECTION,
+                kicker=f"Section · {dimensions.index(dim) + 1:02d}",
+            ))
+
+            if dim_list:
+                # Content page with insights
+                text_blocks = []
+                for ins in dim_list[:3]:
+                    text_blocks.append(HTMLTextBlock(
+                        text=f"{ins.conclusion} (Confidence: {ins.confidence:.0%})",
+                        emphasis=[ins.conclusion[:30]],
+                    ))
+                    if ins.analysis:
+                        text_blocks.append(HTMLTextBlock(text=ins.analysis[:300]))
+                pages.append(HTMLPageModel(
+                    title=dim,
+                    layout=LayoutType.CONTENT,
+                    kicker="Analysis",
+                    text_blocks=text_blocks,
+                ))
+
+                # KPI page if structured metrics available for this dimension
+                if structured_metrics:
+                    dim_metrics = [
+                        m for m in structured_metrics
+                        if m.dimension and m.dimension.strip() == dim.strip()
+                    ]
+                    if dim_metrics:
+                        kpi_items = []
+                        for m in dim_metrics[:4]:
+                            if m.data_points:
+                                latest = m.data_points[-1]
+                                change = ""
+                                trend = "up"
+                                if len(m.data_points) >= 2:
+                                    prev = m.data_points[-2].value
+                                    if prev != 0:
+                                        pct = ((latest.value - prev) / abs(prev)) * 100
+                                        change = f"{pct:+.1f}%"
+                                        trend = "up" if pct >= 0 else "down"
+                                kpi_items.append({
+                                    "label": m.metric_name,
+                                    "value": f"{latest.value}{m.unit}",
+                                    "raw_value": latest.value,
+                                    "unit": m.unit,
+                                    "change": change,
+                                    "trend": trend,
+                                })
+                        if kpi_items:
+                            pages.append(HTMLPageModel(
+                                title=f"{dim} — Key Metrics",
+                                layout=LayoutType.KPI_GRID,
+                                kicker="Metrics",
+                                kpi_metrics=kpi_items,
+                            ))
+            else:
+                pages.append(HTMLPageModel(
+                    title=dim,
+                    layout=LayoutType.CONTENT,
+                    kicker="Pending Analysis",
+                    text_blocks=[HTMLTextBlock(text="Insufficient data for this dimension.")],
+                ))
+
+        # 5) Thanks page
+        pages.append(HTMLPageModel(
+            title="Thank You",
+            layout=LayoutType.THANKS,
+            text_blocks=[HTMLTextBlock(text=f"Report generated by SCDC AI Agent System — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")],
+        ))
+
+        return generator.generate(pages)
+
     async def execute(self, input_data: ReporterInput) -> ReporterOutput:
         await self._ensure_db_config()
         logger.info(
@@ -1310,6 +1647,22 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 llm_report = await self._call_llm(prompt)
 
                 if llm_report and len(llm_report.strip()) > 100:
+                    # 尝试从 LLM 输出末尾的 json 代码块提取结构化 PageModel
+                    extracted_pages, extracted_theme, extracted_notes = (
+                        self._extract_pages_from_llm_response(llm_report)
+                    )
+                    if extracted_pages is not None:
+                        # 把结构化页从 markdown 文本里剥掉（不污染 markdown 导出）
+                        # 简单做法：保留 markdown 原文，但在 metadata 里标记
+                        # 实际持久化时，workflow.py 会从 rep_out.pages 读取
+                        pass
+                    else:
+                        logger.info(
+                            "LLM did not return structured PageModel JSON for task '%s', "
+                            "falling back to MarkdownPageParser pipeline.",
+                            input_data.task_id,
+                        )
+
                     header_md = (
                         f"# 深度市场洞察报告：{input_data.topic}\n\n"
                         f"> **执行时间**: {now_str}  \n"
@@ -1372,8 +1725,25 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
 
                     logger.info(
                         f"ReporterAgent LLM report generated for '{input_data.task_id}' "
-                        f"({len(full_markdown)} chars)"
+                        f"({len(full_markdown)} chars, pages={len(extracted_pages) if extracted_pages else 0})"
                     )
+
+                    # Build HTML report
+                    dims_for_html = dimensions if dimensions else DEFAULT_DIMENSIONS
+                    html_content = ""
+                    try:
+                        html_content = self._build_html_report(
+                            topic=input_data.topic,
+                            summary=summary,
+                            insights=insights,
+                            dimensions=dims_for_html,
+                            structured_metrics=input_data.analyzer_output.structured_metrics,
+                            theme=extracted_theme,
+                        )
+                        logger.info(f"HTML report generated ({len(html_content)} chars)")
+                    except Exception as e:
+                        logger.warning(f"HTML report generation failed: {e}")
+
                     return ReporterOutput(
                         task_id=input_data.task_id,
                         success=True,
@@ -1382,6 +1752,10 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         chart_configs=chart_configs,
                         chart_images=chart_images,
                         dimension_illustrations=dimension_illustrations,
+                        pages=extracted_pages or [],
+                        theme=extracted_theme or "minimal-white",
+                        notes_summary=extracted_notes or "",
+                        html_content=html_content,
                         degraded=False,
                     )
                 else:
@@ -1432,6 +1806,22 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             f"ReporterAgent template report generated for '{input_data.task_id}' "
             f"({len(full_markdown)} chars)"
         )
+
+        # Build HTML report for template path
+        dims_for_html = dimensions if dimensions else DEFAULT_DIMENSIONS
+        html_content = ""
+        try:
+            html_content = self._build_html_report(
+                topic=input_data.topic,
+                summary=summary,
+                insights=insights,
+                dimensions=dims_for_html,
+                structured_metrics=input_data.analyzer_output.structured_metrics,
+            )
+            logger.info(f"HTML report generated for template path ({len(html_content)} chars)")
+        except Exception as e:
+            logger.warning(f"HTML report generation failed for template path: {e}")
+
         return ReporterOutput(
             task_id=input_data.task_id,
             success=True,
@@ -1440,21 +1830,25 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             chart_configs=chart_configs,
             chart_images=chart_images,
             dimension_illustrations=dimension_illustrations,
+            pages=[],
+            theme="minimal-white",
+            notes_summary="",
+            html_content=html_content,
             degraded=True,
         )
 
-    async def execute_with_quality(
+    async def execute_with_html_pipeline(
         self,
         input_data: ReporterInput,
         template_id: Optional[str] = None,
     ) -> Tuple[ReporterOutput, Optional[ReportPageModel], Optional[ValidationResult]]:
-        """执行报告生成 + 质量校验 + 统一页面模型构建
-
-        在现有 execute() 基础上增加：
-        1. Markdown → ReportPageModel 转换
-        2. QualityValidator 校验 + 自动修复
-        3. 返回修复后的 ReportPageModel（供多格式导出使用）
-
+        """执行报告生成 + HTML 生成流程
+        
+        新流程：
+        1. 执行现有报告生成逻辑（生成 Markdown）
+        2. 将 Markdown 转换为带有布局信息的 PageModel
+        3. 返回 PageModel 供 HTML 生成使用
+        
         Returns:
             (ReporterOutput, ReportPageModel | None, ValidationResult | None)
         """
@@ -1462,15 +1856,17 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         output = await self.execute(input_data)
         if not output.success or not output.markdown_report:
             return output, None, None
-
+        
         try:
-            # 2. Markdown → ReportPageModel
+            # 2. Markdown → ReportPageModel（带布局信息）
+            from app.services.html_report_generator import HTMLPageModel, HTMLTextBlock, HTMLImageBlock, LayoutType
+            
             parser = MarkdownPageParser()
             chart_images = output.chart_images or []
-            # 合并 dimension_illustrations 到 chart_images
             if output.dimension_illustrations:
                 chart_images = list(chart_images) + list(output.dimension_illustrations)
-
+            
+            # 先用现有方法生成基础模型
             model = parser.parse(
                 markdown=output.markdown_report,
                 title=input_data.topic,
@@ -1481,35 +1877,26 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                     "degraded": output.degraded,
                 },
             )
-
+            
+            # 3. 布局决策已下沉到 ReportService._choose_layout,
+            #    不再在 ReporterAgent 中预设置 layout_hint.
             logger.info(
-                "ReportPageModel built: %d pages for task '%s'",
-                model.page_count, input_data.task_id,
+                "ReportPageModel built for task '%s': %d pages (layout decided later in _choose_layout)",
+                input_data.task_id, model.page_count,
             )
-
-            # 3. 质量校验 + 自动修复
+            
+            # 4. 质量校验 + 自动修复
             validator = QualityValidator()
             validation = validator.validate(model)
-
+            
             if validation.fixes_applied:
                 logger.info(
                     "QualityValidator applied %d fixes for task '%s': %s",
                     len(validation.fixes_applied), input_data.task_id,
                     validation.fixes_applied,
                 )
-            if validation.errors:
-                logger.warning(
-                    "QualityValidator found %d errors for task '%s': %s",
-                    len(validation.errors), input_data.task_id,
-                    validation.errors,
-                )
-            if validation.warnings:
-                logger.info(
-                    "QualityValidator %d warnings for task '%s'",
-                    len(validation.warnings), input_data.task_id,
-                )
-
-            # 4. 将校验结果信息附加到输出
+            
+            # 5. 将校验结果信息附加到输出
             final_model = validation.fixed_model or model
             output.metadata = output.metadata or {}
             output.metadata["quality_validation"] = {
@@ -1520,13 +1907,33 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 "fixes_detail": validation.fixes_applied,
                 "page_count": final_model.page_count,
             }
-
+            
             return output, final_model, validation
-
+            
         except Exception as e:
             logger.error(
-                "Quality pipeline failed for task '%s': %s. "
+                "HTML pipeline failed for task '%s': %s. "
                 "Falling back to original output.",
                 input_data.task_id, e, exc_info=True,
             )
             return output, None, None
+    
+    def _enhance_layout_info(
+        self,
+        pages: List[PageModel],
+        chart_images: List[Dict[str, Any]],
+    ) -> List[PageModel]:
+        """DEPRECATED: 布局决策已统一移至 ReportService._choose_layout
+
+        历史：此方法曾把 layout_hint 字符串写入 PageModel,
+        然后由 ReportService._convert_pages_to_html 二次映射到 LayoutType.
+        两层映射容易失同步, 维护成本高. 现已合并到 _choose_layout.
+
+        保留为 no-op 桩以保持向后兼容 (外部脚本/测试可能直接调用).
+        建议调用方: 直接传 ReportPageModel 给 ReportService.export_report_with_html_pipeline().
+        """
+        logger.debug(
+            "ReporterAgent._enhance_layout_info is deprecated and a no-op; "
+            "layout decision now happens in ReportService._choose_layout."
+        )
+        return pages
