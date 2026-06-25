@@ -270,7 +270,18 @@ SOURCE MATERIALS:
             response_text = self._clean_json_response(response_text)
             if not response_text:
                 raise json.JSONDecodeError("Empty response after cleaning", "", 0)
-            return json.loads(response_text)
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                # Try to extract JSON object from the response
+                import re
+                match = re.search(r'\{[\s\S]*\}', response_text)
+                if match:
+                    try:
+                        return json.loads(match.group())
+                    except json.JSONDecodeError:
+                        pass
+                raise
 
     def _clean_json_response(self, text: str) -> str:
         text = text.strip()
@@ -280,6 +291,11 @@ SOURCE MATERIALS:
             text = text[3:]
         if text.endswith("```"):
             text = text[:-3]
+        text = text.strip()
+        # Fix trailing commas before } or ]
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        # Fix unquoted property names: { key: "value" } -> { "key": "value" }
+        text = re.sub(r'(?<=[{,\n])\s*([a-zA-Z_]\w*)\s*:', r' "\1":', text)
         return text.strip()
 
     def _parse_structured_metrics(self, raw_metrics: list) -> List[StructuredMetric]:
