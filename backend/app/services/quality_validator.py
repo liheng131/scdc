@@ -128,6 +128,9 @@ class QualityValidator:
     def _validate_images(self, page: PageModel, index: int, result: ValidationResult):
         valid_images: List[ImageBlock] = []
         for img_idx, img in enumerate(page.images):
+            # Auto-fix raw base64: wrap with data:image prefix
+            fix_applied = self._fix_base64_prefix(img, index, img_idx, result)
+
             issues = self._check_image(img)
 
             # 额外检查：渲染尺寸参数是否合理
@@ -163,6 +166,34 @@ class QualityValidator:
                 valid_images.append(img)
         page.images = valid_images
 
+    def _fix_base64_prefix(
+        self, img: ImageBlock, page_idx: int, img_idx: int, result: ValidationResult,
+    ) -> bool:
+        """Auto-fix raw base64 by wrapping with data:image prefix if needed."""
+        if not img.base64 or not img.base64.strip():
+            return False
+        raw = img.base64.strip()
+        if raw.startswith("data:image"):
+            return False
+        try:
+            decoded = base64.b64decode(raw, validate=True)
+        except Exception:
+            return False
+        mime = "image/png"
+        if decoded[:3] == b'\xff\xd8\xff':
+            mime = "image/jpeg"
+        elif decoded[:4] == b'\x89PNG':
+            mime = "image/png"
+        elif decoded[:4] == b'GIF8':
+            mime = "image/gif"
+        elif decoded[:4] == b'RIFF':
+            mime = "image/webp"
+        img.base64 = f"data:{mime};base64,{raw}"
+        result.fixes_applied.append(
+            f"页{page_idx+1} 图片{img_idx+1}: raw base64 自动包装为 {mime}"
+        )
+        return True
+
     def _check_image(self, img: ImageBlock) -> List[str]:
         """检查单张图片，返回问题列表"""
         issues: List[str] = []
@@ -170,8 +201,19 @@ class QualityValidator:
             issues.append("base64 数据为空")
             return issues
 
+        raw_b64 = img.base64.strip()
+        if not raw_b64.startswith("data:image"):
+            issues.append("base64 缺少 data:image 前缀")
+            return issues
+
+        comma_idx = raw_b64.find(",")
+        if comma_idx == -1:
+            issues.append("data:image 格式无效：缺少逗号分隔符")
+            return issues
+
+        payload = raw_b64[comma_idx + 1:]
         try:
-            raw = base64.b64decode(img.base64.strip(), validate=True)
+            raw = base64.b64decode(payload, validate=True)
         except Exception as e:
             issues.append(f"base64 解码失败: {e}")
             return issues
@@ -306,7 +348,7 @@ class QualityValidator:
     # ── 对比度校验 ──
 
     def _validate_contrast(self, page: PageModel, index: int, result: ValidationResult):
-        """校验文字颜色与背景的对比度"""
+        """校验文字颜色与背景的对比度（WCAG AA 标准）"""
         bg_rgb = self._hex_to_rgb(page.bg_color)
         if bg_rgb is None:
             return
@@ -323,12 +365,15 @@ class QualityValidator:
             if ratio < threshold:
                 result.warnings.append(
                     f"页{index+1} \"{tb.text[:20]}...\": "
-                    f"对比度 {ratio:.1f} < {threshold} (WCAG AA)"
+                    f"对比度 {ratio:.1f}:1 < {threshold}:1 (WCAG AA)"
                 )
-                # 自动修复
+                # Auto-fix: pick color that maximizes contrast against background
                 tb.color = self._fix_color(page.bg_color, is_title)
+                new_rgb = self._hex_to_rgb(tb.color)
+                new_ratio = self._contrast_ratio(new_rgb, bg_rgb) if new_rgb else 0
                 result.fixes_applied.append(
-                    f"页{index+1}: 文字颜色已自动调整以适配背景"
+                    f"页{index+1}: 文字颜色 {fg_rgb} → {tb.color}，"
+                    f"对比度 {ratio:.1f}:1 → {new_ratio:.1f}:1"
                 )
 
     @staticmethod
