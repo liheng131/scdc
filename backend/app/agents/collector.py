@@ -33,6 +33,7 @@ from app.services.web_image_extractor import web_image_extractor
 from app.crawlers.http_crawler import HTTPCrawler
 from app.schemas.crawler import CrawlRequest
 from app.core.db import async_session_factory
+from app.core.config import settings
 from app.models.attachment import Attachment
 
 logger = logging.getLogger(__name__)
@@ -196,21 +197,77 @@ class CollectorAgent:
 
         # 4. 从 Top 5 URL 提取网页截图
         extracted_images = []
+        extraction_error = None
         try:
             top_urls = [r.url for r in top_results[:5] if r.url]
+            logger.info(
+                f"CollectorAgent: attempting web screenshot extraction for {len(top_urls)} URLs: "
+                f"{[u[:60] for u in top_urls[:3]]}"
+            )
             if top_urls:
                 extracted_images = await web_image_extractor.extract_chart_screenshots(
                     urls=top_urls,
                     max_images=5,
                     timeout=15000,
                 )
+                logger.info(
+                    f"CollectorAgent: successfully extracted {len(extracted_images)} web screenshots"
+                )
+            else:
+                logger.info("CollectorAgent: no URLs available for screenshot extraction")
         except Exception as e:
-            logger.warning(f"Image extraction failed: {e}")
+            extraction_error = str(e)
+            import traceback
+            logger.warning(
+                f"CollectorAgent: web image extraction FAILED: {type(e).__name__}: {e}\n"
+                f"  URLs attempted: {[u[:80] for u in top_urls[:3]] if 'top_urls' in dir() else 'N/A'}\n"
+                f"{traceback.format_exc()[-500:]}"
+            )
+
+        # 5. Pexels 高质量图片搜索（与网页截图互补）
+        pexels_images = []
+        pexels_api_key = settings.pexels_api_key
+        if pexels_api_key:
+            try:
+                from app.services.pexels_client import search_and_download
+                # 用前5个扩展关键词 + topic 作为搜索词（覆盖更多维度）
+                pexels_queries = list(keywords[:5]) if keywords else [input_data.topic[:50]]
+                pexels_images = await search_and_download(
+                    api_key=pexels_api_key,
+                    queries=pexels_queries,
+                    per_query=4,     # 每个查询获取4张
+                    total_limit=15,  # 总量提升到15张（原来6张）
+                )
+                if pexels_images:
+                    logger.info(
+                        "CollectorAgent: Pexels returned %d high-quality photos for queries=%s",
+                        len(pexels_images), pexels_queries,
+                    )
+                else:
+                    logger.info("CollectorAgent: Pexels search returned no photos")
+            except Exception as e:
+                logger.warning("CollectorAgent: Pexels integration failed: %s", e)
+        else:
+            logger.debug("CollectorAgent: Pexels API key not configured, skipping")
+        
+        # 合并 Pexels 图片到 extracted_images
+        if pexels_images:
+            extracted_images = list(extracted_images) + pexels_images
+
+        # 构建 warning（含图片采集失败原因）
+        warning_msg = None
+        if len(extracted_images) == 0 and extraction_error:
+            warning_msg = f"web_image_extraction_failed: {extraction_error[:200]}"
+        elif len(extracted_images) == 0 and all_results:
+            warning_msg = f"web_image_extraction: 0 images from {len(all_results)} search results"
+        elif len(extracted_images) > 0:
+            logger.info(f"CollectorAgent: {len(extracted_images)} web images collected successfully")
 
         return CollectorOutput(
             task_id=input_data.task_id,
             success=True,
             items=collected_items,
+            warning=warning_msg or None,
             expanded_keywords=self._expanded_keywords,
             extracted_images=extracted_images,
             metadata={

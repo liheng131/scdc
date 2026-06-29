@@ -481,6 +481,10 @@ SOURCE MATERIALS:
             for item in input_data.cleaned_items
         )
         structured_metrics = self._extract_metrics_from_text(all_text, input_data.dimensions)
+        logger.info(
+            "AnalyzerAgent (degraded): regex-extracted %d structured_metrics from %d chars text",
+            len(structured_metrics), len(all_text),
+        )
 
         return AnalyzerOutput(
             task_id=input_data.task_id,
@@ -623,8 +627,18 @@ SOURCE MATERIALS:
             raw_metrics = llm_result.get("structured_metrics", [])
             structured_metrics = self._parse_structured_metrics(raw_metrics)
             logger.info(
-                f"Extracted {len(structured_metrics)} structured metrics from LLM for task '{input_data.task_id}'"
+                "AnalyzerAgent: LLM returned %d raw structured_metrics → %d parsed (min 2 data_points each) "
+                "for task '%s'",
+                len(raw_metrics) if isinstance(raw_metrics, list) else 0,
+                len(structured_metrics),
+                input_data.task_id,
             )
+            if raw_metrics and len(raw_metrics) > 0 and len(structured_metrics) == 0:
+                logger.warning(
+                    "AnalyzerAgent: ALL %d structured_metrics filtered out (no metric had >= 2 data_points). "
+                    "LLM may not be generating multi-point data. Reporter will use insights fallback.",
+                    len(raw_metrics),
+                )
 
             return AnalyzerOutput(
                 task_id=input_data.task_id,

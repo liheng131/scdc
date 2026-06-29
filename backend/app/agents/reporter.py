@@ -201,141 +201,201 @@ class ReporterAgent:
                 )
             sources_section = "\n== SOURCE MATERIALS FOR REFERENCE ==\n" + "\n".join(source_parts) + "\n"
 
-        prompt = f"""You are a senior market intelligence analyst at McKinsey & Company with 20 years of experience. Write a professional, deep market insight report in Chinese.
+        prompt = f"""You are a senior market intelligence analyst at a top consulting firm. Output a PROFESSIONAL, DATA-RICH presentation deck in Chinese for html-ppt rendering. Your report will be read by senior executives.
 
-The topic is: "{topic}"
+Topic: "{topic}"
 
-Below is the structured analysis prepared by an AI research assistant, organized by analytical dimensions. Your job is to transform it into a polished, boardroom-ready report.
-
-{sources_section}
-== EXECUTIVE SUMMARY ==
+== ANALYSIS DATA ==
+Executive Summary:
 {summary}
 
-== INSIGHTS BY DIMENSION ==
+Dimensions to cover: {', '.join(dims)}
+
+Insights by dimension:
 {dim_text}
 
-== REPORT STRUCTURE REQUIREMENTS ==
+Source materials (for fact-checking only):
+{sources_section if sources_section else '(none)'}
 
-Write in Chinese. Follow this structure:
+== YOUR TASK ==
+Follow the html-ppt design system rules below. Output ONLY a JSON array of slides in ```json ... ```.
 
-## 📑 执行摘要 (Executive Summary)
-Write 3-4 paragraphs (250-400 words) synthesizing findings across ALL dimensions. Include key numbers, company names, and directional signals.
+{self._load_html_ppt_skill()}
 
-{dim_outline}
+== SLIDE STRUCTURE (12-24 slides, professional depth) ==
+1. cover (1 slide)
+2. toc (1 slide)
+3-4. Per dimension (total 10-20 slides allocated across {len(dims)} dimensions):
+   - Dimension section divider (1 slide)
+   - Core analysis (2-3 content/bullets/two_column slides — deep, multi-paragraph)
+   - Data visualization (1 kpi_grid or chart_bar/chart_pie slide — real numbers only)
+   - Image page (1 image_hero or image_grid slide — suggest images for every dimension)
+   - OPTIONAL: counter-analysis or competing viewpoint slide (1 slide)
+5. thanks (1 slide)
 
-The report must contain exactly {len(dims)} dynamic dimension chapters, one per dimension listed above. For each chapter:{dim_chapters_text}
+Supported layouts: cover / toc / section / content / bullets / kpi_grid / two_column / three_column / table / stat / chart_bar / chart_line / chart_pie / image_hero / image_grid / thanks
 
-## ⚠️ 跨维度风险与挑战
-Write 2-3 paragraphs synthesizing risks that span multiple dimensions. Cover probability and impact.
-
-## 💡 综合战略建议
-Write 3-5 actionable, specific recommendations. Each as a bullet with 2-3 sentences of rationale.
-
-## 🔗 数据来源说明
-Briefly note data sources. Do NOT list individual URLs - the system will append those.
-
-== IMAGE-TEXT COMBINATION (图文结合) REQUIREMENTS ==
-- 每个分析章节应至少引用一个图表，使用 [CHART: type|dimension] 标记，如 [CHART: bar|宏观经济环境]
-- 避免连续超过 300 字不包含图表引用
-- chart_type 可选: bar(柱状图), line(折线图), pie(饼图), table(表格), matrix(矩阵), flow(流程图)
-- dimension 必须是 {dim_slots_str} 之一
-- 在需要展示数据对比的位置插入 [CHART: bar|<维度名>],在需要展示趋势的位置插入 [CHART: line|<维度名>],在需要展示占比/分布的位置插入 [CHART: pie|<维度名>]
-- 标记应该嵌入到正文中,而不是单独成段,例如: "2024年市场规模达到1200亿元,同比增长15% [CHART: bar|宏观经济环境]"
-
-== STYLE GUIDELINES ==
-- Professional, boardroom-ready Chinese prose
-- Data-driven: cite specific facts/numbers whenever possible
-- Balanced: acknowledge uncertainty
-- Actionable: every section should help decision-making
-- Total: 1500-3000 Chinese characters
-- Use ## headings, **bold**, bullet lists, > blockquotes
-- 关键洞察用 > blockquote 引用格式包裹
-- 各章节之间用 --- 分隔线
-
-== HTML-PPT STRUCTURED OUTPUT (Phase 1) ==
-在 markdown 报告的**最末尾**，请另外输出一个 JSON 代码块（用 ```json ... ``` 包裹），
-用于驱动 html-ppt 渲染管线。JSON 结构如下：
+JSON format (OUTPUT PURE JSON ONLY, NO Markdown):
 
 ```json
 {{
-  "theme": "minimal-white",
-  "notes_summary": "150 字以内的整份报告执行摘要（演讲者模式开篇用）",
+  "theme": "corporate-clean",
   "pages": [
     {{
-      "page_type": "cover",
-      "title": "报告主标题",
-      "kicker": "副标题/眉头",
       "layout": "cover",
-      "animations": ["fade-up"],
-      "data_fx": "",
-      "notes": "封面页 150-300 字逐字稿（讲什么、为何讲、关键钩子）",
-      "text_blocks": [{{"text": "副标题文本", "emphasis": ["关键词"]}}],
-      "image_blocks": [],
-      "kpi_metrics": [],
-      "table_data": null
+      "title": "报告主标题（精炼有力，包含关键词）",
+      "kicker": "Market Insight Report",
+      "text_blocks": [
+        {{"text": "副标题 · 日期 · 团队名称", "is_lead": false}},
+        {{"text": "核心发现一句话总结（50字以内，吸引眼球）", "is_lead": true}}
+      ],
+      "notes": "180-350字开场白：本次报告背景、核心主题、关键发现预览、阅读建议",
+      "image_hints": ["抽象科技感/数据感背景图, 深色调"]
     }},
     {{
-      "page_type": "toc",
-      "title": "目录",
       "layout": "toc",
-      "animations": ["fade-up"],
-      "notes": "目录页 150-300 字演讲稿",
+      "title": "报告目录",
       "text_blocks": [
-        {{"text": "宏观经济环境"}},
-        {{"text": "行业形势与趋势"}},
-        {{"text": "竞争格局与对手"}}
-      ]
+        {{"text": "01 " + dims[0] if dims else "维度1", "emphasis": []}},
+        {{"text": "02 " + dims[1] if len(dims) > 1 else "维度2", "emphasis": []}},
+        {{"text": "03 " + dims[2] if len(dims) > 2 else "维度3", "emphasis": []}},
+        {{"text": "04 总结与展望", "emphasis": []}}
+      ],
+      "notes": "180-350字：各章节内容简介、阅读路径建议"
     }},
     {{
-      "page_type": "section",
-      "title": "宏观经济环境",
       "layout": "section",
-      "animations": ["fade-up"],
-      "notes": "章节封面 150-300 字演讲稿"
-    }},
-    {{
-      "page_type": "content",
-      "title": "市场规模与增速",
-      "layout": "content",
-      "animations": ["fade-up", "rise-in"],
-      "notes": "该页 150-300 字演讲稿",
+      "title": "01 / 维度名称",
+      "kicker": "PART 1",
       "text_blocks": [
-        {{"text": "核心段落文本"}}
-      ]
+        {{"text": "本章核心发现一句话", "is_lead": true}}
+      ],
+      "notes": "180-350字：本章节关键问题、分析框架、预期收获"
     }},
     {{
-      "page_type": "content",
-      "title": "关键指标一览",
+      "layout": "content",
+      "title": "具体分析标题（观点性、有信息量）",
+      "kicker": "关键发现",
+      "text_blocks": [
+        {{"text": "第一段（300-500字）：详细分析核心趋势、市场规模、增长驱动因素，引用具体数字、厂商名称、政策文本。必须包含至少2个可核查的数据点。", "is_lead": false, "emphasis": ["关键词A", "关键词B"]}},
+        {{"text": "第二段（300-500字）：行业竞争格局、技术路线分歧、区域分布、产业链变化。对比不同参与者的策略差异。", "is_lead": false, "emphasis": ["关键词C"]}},
+        {{"text": "第三段（200-400字）：影响与展望。分析此趋势对产业链各环节的短期和长期影响，给出具体判断而非模糊预测。", "is_lead": false, "emphasis": []}}
+      ],
+      "source": "来源: 行家说, LED inside",
+      "notes": "180-350字演讲稿：用口语化语言讲清楚本页核心观点，引导听众关注关键数据",
+      "image_hints": ["行业趋势图表, 数据可视化, 深蓝科技风格"]
+    }},
+    {{
       "layout": "kpi_grid",
-      "animations": ["counter-up"],
-      "notes": "KPI 页演讲稿",
+      "title": "关键数据指标",
       "kpi_metrics": [
-        {{"label": "市场规模", "value": "1200亿", "raw_value": 1200, "unit": "亿元", "change": "+15% YoY", "trend": "up"}},
-        {{"label": "国产化率", "value": "35%", "raw_value": 35, "unit": "%", "change": "+8pp", "trend": "up"}}
-      ]
+        {{"label": "市场规模", "value": "4,500亿", "raw_value": 4500, "unit": "亿元", "change": "+42% YoY", "trend": "up"}},
+        {{"label": "增长率", "value": "42%", "raw_value": 42, "unit": "%", "change": "+8pp vs上年", "trend": "up"}},
+        {{"label": "CR3集中度", "value": "65%", "raw_value": 65, "unit": "%", "change": "+5pp", "trend": "up"}},
+        {{"label": "国产化率", "value": "35%", "raw_value": 35, "unit": "%", "change": "+12pp", "trend": "up"}}
+      ],
+      "notes": "180-350字：逐一解读KPI含义、关联关系、异常值解释"
+    }},
+    {{
+      "layout": "image_hero",
+      "title": "相关图表与视觉材料",
+      "text_blocks": [{{"text": "图表说明文字", "is_lead": false}}],
+      "image_hints": ["产业链全景图, 市场占有率饼图, 科技信息图风格"],
+      "notes": "180-350字"
+    }},
+    {{
+      "layout": "thanks",
+      "title": "Thank You",
+      "text_blocks": [
+        {{"text": "报告由SCDC AI Agent生成"}},
+        {{"text": "关键结论回顾：1) ... 2) ... 3) ..."}}
+      ],
+      "notes": "180-350字结语：3-5条核心takeaway、下一步行动建议"
     }}
   ]
 }}
 ```
 
-**JSON 字段说明**：
-- `theme`: 选自以下之一 — minimal-white / tokyo-night / dracula / aurora / nord / corporate-clean / glassmorphism / pitch-deck-vc / engineering-whiteprint / academic-paper
-- `layout`: 每页选一个 — cover / toc / section / content / bullets / kpi_grid / two_column / three_column / table / image_hero / image_grid / stat / thanks
-- `animations`: data-anim 值列表，至少 1 个。常用：fade-up / fade-left / rise-in / counter-up / stagger-list
-- `notes`: 150-300 字演讲者逐字稿（用户按 S 键可看到）
-- `kpi_metrics`: `[{label, value, raw_value, unit, change, trend}]` 数组
-- `pages` 至少 4 页：cover + toc + 至少 1 个 section + 至少 1 个 content
-
-**降级策略**：如果你无法稳定输出结构化 JSON，请在 markdown 末尾直接输出 `<!-- NO_PAGE_MODEL -->` 标记，
-后端会回退到 MarkdownPageParser 路径（仍然可正常生成报告）。"""
-
+== FINAL RULES (STRICT) ==
+- Output ONLY ```json ... ``` block. NO Markdown, NO explanations before/after.
+- Total 12-24 slides. Each dimension gets 3-5 slides (section + 2-3 content + kpi/chart + image).
+  VARY layouts — never same layout on consecutive slides. Use at least 8 different layout types across the deck.
+- Every slide MUST have "notes" (180-350 chars colloquial Chinese speaker script).
+- KPI/chart data STRICTLY from analysis data above. Mark invented data with confidence caveat in notes.
+- text_blocks: 200-500 chars each, 2-4 blocks per content slide. Write SUBSTANTIVE analysis paragraphs, not bullet-point fragments.
+- "emphasis" array lists 1-3 key terms per text block to highlight in accent color.
+- "image_hints": REQUIRED for content/kpi_grid/section/image_hero pages. Describe scene/style/mood (Chinese). At least 40% of all slides should have image_hints.
+- "source": Include source citations ("来源: ...") in text_blocks or as separate field for data-heavy slides.
+- Cover slide MUST have a lead text_block with the core finding hook.
+- Thanks slide MUST recap 3-5 key takeaways.
+- counter-analysis: For at least ONE dimension, include a slide examining competing viewpoints, risks, or counter-arguments (不呈现单一乐观叙事)."""
         return prompt
 
-    # ── LLM 输出中的结构化 PageModel JSON 解析 ───────────────
+    @staticmethod
+    def _load_html_ppt_skill() -> str:
+        """动态加载 html-ppt SKILL.md，解耦设计规则与代码"""
+        import os
+        skill_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "static", "html-ppt", "SKILL.md"
+        )
+        if not os.path.exists(skill_path):
+            logger.warning("html-ppt SKILL.md not found at %s, using minimal rules", skill_path)
+            return """== html-ppt MINIMAL RULES ==
+- Output slides with layout types: cover/toc/section/content/kpi_grid/chart_bar/chart_pie/stat/thanks
+- Every slide needs "notes" field (150-300 Chinese chars speaker script)
+- VARY layouts across slides, never text-only slides
+- KPI/chart data must come from analysis data, do not fabricate"""
 
-    # 优先匹配显式 json 代码块；找不到再尝试提取首段 {...} 顶层 JSON
+        try:
+            with open(skill_path, "r", encoding="utf-8") as f:
+                skill_content = f.read()
+
+            # 提取核心配置段落（去掉不相关的安装/脚本部分）
+            sections = []
+            for line in skill_content.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("## "):
+                    section_name = stripped[3:]
+                    # 只保留设计相关段落
+                    if section_name in (
+                        "When to use",
+                        "What the skill gives you",
+                        "design ideas",
+                        "Design Ideas",
+                        "For Each Slide",
+                        "Typography",
+                        "Spacing",
+                        "Avoid (Common Mistakes)",
+                        "Authoring rules (important)",
+                        "Writing guide",
+                        "色彩和字体",
+                        "配色方案",
+                        "Color Palettes",
+                    ):
+                        sections.append(f"<!-- {section_name} -->")
+                    else:
+                        sections.append(f"<!-- SKIP {section_name} -->")
+                else:
+                    sections.append(line)
+
+            result = "\n".join(sections)
+
+            # 截断过长内容（LLM token 限制），提升到 12000 以传递更丰富的设计规则
+            if len(result) > 12000:
+                result = result[:12000] + "\n\n<!-- SKILL.md truncated to 12000 chars -->"
+
+            logger.info("Loaded html-ppt SKILL.md: %d chars", len(result))
+            return "== html-ppt DESIGN SYSTEM (from SKILL.md) ==\n" + result
+        except Exception as e:
+            logger.warning("Failed to load html-ppt SKILL.md: %s", e)
+            return """== html-ppt MINIMAL RULES ==
+- Output slides as JSON with layouts: cover/toc/section/content/kpi_grid/chart_bar/chart_pie/stat/thanks
+- Every slide needs "notes" (150-300 chars speaker script)
+- VARY layouts, never text-only, KPI data from analysis only"""
+
+    # ── JSON 提取正则 ──
     _JSON_BLOCK_RE = re.compile(r"```(?:json|JSON)?\s*(\{[\s\S]+?\})\s*```", re.MULTILINE)
-    _NO_PAGE_MODEL_MARKER = "<!-- NO_PAGE_MODEL -->"
 
     def _extract_pages_from_llm_response(
         self,
@@ -348,11 +408,6 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             (pages, theme, notes_summary) — 任意字段解析失败时该项为 None
         """
         if not llm_response:
-            return None, None, None
-
-        # 0) 显式 "无法输出结构化" 标记
-        if self._NO_PAGE_MODEL_MARKER in llm_response:
-            logger.info("LLM opted out of structured PageModel output (NO_PAGE_MODEL marker)")
             return None, None, None
 
         # 1) 匹配 json 代码块
@@ -417,6 +472,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             "cover", "toc", "section", "content", "bullets", "kpi_grid",
             "two_column", "three_column", "table", "image_hero", "image_grid",
             "stat", "thanks",
+            "chart_bar", "chart_line", "chart_pie",
         }
         for idx, page in enumerate(pages):
             if not isinstance(page, dict):
@@ -435,6 +491,10 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 page["image_blocks"] = []
             if not isinstance(page.get("kpi_metrics"), list):
                 page["kpi_metrics"] = []
+            if not isinstance(page.get("chart_data"), dict):
+                page["chart_data"] = None
+            if not isinstance(page.get("image_hints"), list):
+                page["image_hints"] = []
             if not isinstance(page.get("animations"), list):
                 page["animations"] = ["fade-up"]  # 兜底加一个动效
             if not page.get("notes"):
@@ -1507,6 +1567,81 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             return "chart_pie"
         return "chart_bar"
 
+    @staticmethod
+    def _convert_llm_pages_to_html(
+        llm_pages: List[Dict[str, Any]],
+        LayoutType,
+    ) -> List:
+        """将 LLM JSON 结构化页面转换为 HTMLPageModel 列表
+        
+        LLM 输出的 JSON 格式与 HTMLPageModel 几乎 1:1 对应，
+        直接转换即可保留 LLM 精心构建的 chart_data/kpi_metrics/notes 等内容。
+        """
+        from app.services.html_report_generator import HTMLPageModel, HTMLTextBlock, HTMLImageBlock
+
+        pages = []
+        layout_str_to_enum = {}
+        for lt in LayoutType:
+            layout_str_to_enum[lt.value] = lt
+
+        for lp in llm_pages:
+            if not isinstance(lp, dict):
+                continue
+
+            # 解析 layout
+            layout_str = lp.get("layout", "content")
+            layout = layout_str_to_enum.get(layout_str, LayoutType.CONTENT)
+
+            # 转换 text_blocks
+            text_blocks = []
+            for tb in (lp.get("text_blocks") or []):
+                if isinstance(tb, dict):
+                    text_blocks.append(HTMLTextBlock(
+                        text=tb.get("text", ""),
+                        emphasis=tb.get("emphasis", []),
+                        is_bullet=tb.get("is_bullet", False),
+                        is_lead=tb.get("is_lead", False),
+                    ))
+                elif isinstance(tb, str):
+                    text_blocks.append(HTMLTextBlock(text=tb))
+
+            # 转换 image_blocks（LLM 输出的是 image_hints，不是实际 base64）
+            image_blocks = []
+            for ib in (lp.get("image_blocks") or []):
+                if isinstance(ib, dict):
+                    image_blocks.append(HTMLImageBlock(
+                        url=ib.get("url", ib.get("base64", "")),
+                        caption=ib.get("caption", ""),
+                        source=ib.get("source", ""),
+                    ))
+
+            # chart_data（LLM 输出的格式与 Chart.js 兼容）
+            chart_data = lp.get("chart_data")
+            if chart_data and isinstance(chart_data, dict):
+                # 确保 labels 和 datasets 字段存在
+                if "labels" not in chart_data or "datasets" not in chart_data:
+                    chart_data = None
+
+            # table_data
+            table_data = lp.get("table_data")
+
+            # kpi_metrics
+            kpi_metrics = lp.get("kpi_metrics") or []
+
+            pages.append(HTMLPageModel(
+                title=lp.get("title", f"Page {len(pages)+1}"),
+                layout=layout,
+                kicker=lp.get("kicker", ""),
+                text_blocks=text_blocks,
+                image_blocks=image_blocks,
+                kpi_metrics=kpi_metrics,
+                table_data=table_data if isinstance(table_data, dict) else None,
+                chart_data=chart_data,
+                notes=lp.get("notes", ""),
+            ))
+
+        return pages
+
     def _build_html_report(
         self,
         topic: str,
@@ -1517,6 +1652,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         theme: Optional[str] = None,
         user_images: Optional[List[Dict[str, Any]]] = None,
         web_images: Optional[List[Dict[str, Any]]] = None,
+        extracted_pages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Build a complete HTML report using the html-ppt design system.
 
@@ -1526,6 +1662,10 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
         Args:
             user_images: List of dicts with 'base64' and optional 'caption' keys
             web_images: List of dicts with 'base64', 'source_url', and optional 'caption' keys
+            extracted_pages: If provided, use LLM's structured JSON pages instead of
+                             building pages from insights/dimensions programmatically.
+                             Format: [{"title":..., "layout":"cover", "text_blocks":[...],
+                                      "kpi_metrics":[...], "chart_data":{...}, "notes":...}, ...]
         """
         from app.services.html_report_generator import (
             HTMLReportGenerator,
@@ -1540,6 +1680,44 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
             theme = theme_selector.select_theme(topic, summary)
 
         generator = HTMLReportGenerator(theme=theme)
+        
+        # 优先使用 LLM 的结构化 JSON 页面（更强的内容质量 + chart_data/kpi_metrics）
+        use_llm_pages = bool(extracted_pages and isinstance(extracted_pages, list) and len(extracted_pages) > 2)
+        if use_llm_pages:
+            pages = self._convert_llm_pages_to_html(extracted_pages, LayoutType)
+            logger.info(
+                "_build_html_report: using %d LLM-structured pages (preferring JSON over programmatic)",
+                len(pages),
+            )
+            # 仍然对 LLM 页面做图片分配
+            has_images = bool(user_images or web_images)
+            if has_images:
+                try:
+                    from app.services.image_assigner import image_assigner
+                    assignments = image_assigner.assign(pages, web_images, user_images)
+                    overflow_images: List[HTMLImageBlock] = []
+                    for page_idx, img_blocks in assignments.items():
+                        if page_idx == -1:
+                            overflow_images = img_blocks
+                        elif 0 <= page_idx < len(pages):
+                            pages[page_idx].image_blocks = list(pages[page_idx].image_blocks) + img_blocks
+                    if overflow_images:
+                        pages.append(HTMLPageModel(
+                            title="参考图集", layout=LayoutType.IMAGE_GRID,
+                            kicker="Gallery", image_blocks=overflow_images, notes="额外参考图片",
+                        ))
+                except Exception as e:
+                    logger.warning(f"ImageAssigner failed for LLM pages: {e}")
+            # Thanks page
+            pages.append(HTMLPageModel(
+                title="Thank You", layout=LayoutType.THANKS,
+                text_blocks=[HTMLTextBlock(
+                    text=f"Report generated by SCDC AI Agent System — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )],
+            ))
+            return generator.generate(pages)
+
+        # ── 以下为程序化路径（extracted_pages 为空时）──
         pages: List[HTMLPageModel] = []
 
         # 1) Cover page
@@ -1590,7 +1768,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 notes=summary[:300],
             ))
 
-        # 3.5) Global KPI overview from all structured metrics
+        # 3.5) Global KPI overview from structured metrics (or insights fallback)
         if structured_metrics:
             all_kpi_items = []
             for m in structured_metrics[:6]:
@@ -1612,13 +1790,33 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         "change": change,
                         "trend": trend,
                     })
-            if all_kpi_items:
-                pages.append(HTMLPageModel(
-                    title="Key Metrics Overview",
-                    layout=LayoutType.KPI_GRID,
-                    kicker="Overview",
-                    kpi_metrics=all_kpi_items[:4],
-                ))
+        else:
+            # Fallback: build KPI from insights (dimension stats + confidence)
+            all_kpi_items = []
+            for dim in dimensions[:4]:
+                dim_ins = [i for i in insights if (i.dimension or "").strip() == dim.strip()]
+                if dim_ins:
+                    avg_conf = sum(i.confidence for i in dim_ins) / len(dim_ins)
+                    all_kpi_items.append({
+                        "label": dim[:10],
+                        "value": f"{len(dim_ins)}条",
+                        "raw_value": len(dim_ins),
+                        "unit": "洞察",
+                        "change": f"均置信度 {avg_conf:.0%}",
+                        "trend": "up",
+                    })
+            logger.info(
+                "KPI fallback: built %d items from insights (structured_metrics was empty)",
+                len(all_kpi_items),
+            )
+        
+        if all_kpi_items:
+            pages.append(HTMLPageModel(
+                title="Key Metrics Overview",
+                layout=LayoutType.KPI_GRID,
+                kicker="Overview",
+                kpi_metrics=all_kpi_items[:4],
+            ))
 
         # 4) Dimension analysis pages with charts and KPI
         dim_insights: Dict[str, List[Insight]] = {}
@@ -1675,7 +1873,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         chart_data=insight_chart,
                     ))
 
-                # Chart pages from structured metrics
+                # Chart pages from structured metrics (or insights fallback)
                 if structured_metrics:
                     dim_metrics = [
                         m for m in structured_metrics
@@ -1739,6 +1937,23 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                             kicker="Data",
                             table_data={"headers": headers, "rows": rows},
                         ))
+                else:
+                    # Fallback: no structured_metrics → create stat/chart page from insights
+                    if dim_list:
+                        avg_conf = sum(i.confidence for i in dim_list) / len(dim_list)
+                        pages.append(HTMLPageModel(
+                            title=f"{dim} — Key Findings",
+                            layout=LayoutType.STAT_HIGHLIGHT,
+                            kicker="Key Stat",
+                            kpi_metrics=[{
+                                "label": f"Insight Count",
+                                "value": f"{len(dim_list):.0f}",
+                                "raw_value": len(dim_list),
+                            }],
+                            text_blocks=[HTMLTextBlock(
+                                text=f"{len(dim_list)} insights found for this dimension (avg confidence: {avg_conf:.1%})"
+                            )],
+                        ))
             else:
                 pages.append(HTMLPageModel(
                     title=dim,
@@ -1769,32 +1984,64 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         text_blocks=[HTMLTextBlock(text=f"Latest data: {latest.label}")],
                     ))
 
-        # 6) User and web images gallery
-        all_images: List[HTMLImageBlock] = []
-        for img in (user_images or []):
-            b64 = img.get("base64", "")
-            if b64:
-                all_images.append(HTMLImageBlock(
-                    url=f"data:image/png;base64,{b64}",
-                    caption=img.get("caption", ""),
-                    source="user_upload",
-                ))
-        for img in (web_images or []):
-            b64 = img.get("base64", "")
-            if b64:
-                all_images.append(HTMLImageBlock(
-                    url=f"data:image/png;base64,{b64}",
-                    caption=img.get("caption", "") or img.get("title", ""),
-                    source=img.get("source_url", ""),
-                ))
-        if all_images:
-            pages.append(HTMLPageModel(
-                title="参考图片",
-                layout=LayoutType.IMAGE_GRID,
-                kicker="Gallery",
-                image_blocks=all_images,
-                notes="用户上传及网页提取的参考图片",
-            ))
+        # 6) 智能图片分配：按内容相关性将图片分散到各页面（图文结合）
+        #    对标豆                    ))
+
+        # 6) 智能图片分配：LLM 路径和程序化路径都执行
+        #    对标豆包/千问的思路：不在末尾堆图集，而是每页配相关图片
+        has_images = bool(user_images or web_images)
+        if has_images:
+            try:
+                from app.services.image_assigner import image_assigner
+                assignments = image_assigner.assign(pages, web_images, user_images)
+                # 注入分配的图片到对应页面
+                overflow_images: List[HTMLImageBlock] = []
+                for page_idx, img_blocks in assignments.items():
+                    if page_idx == -1:
+                        overflow_images = img_blocks
+                    elif 0 <= page_idx < len(pages):
+                        pages[page_idx].image_blocks = list(pages[page_idx].image_blocks) + img_blocks
+                # 剩余的溢出图片放入独立图集页（如果有的话）
+                if overflow_images:
+                    pages.append(HTMLPageModel(
+                        title="参考图集",
+                        layout=LayoutType.IMAGE_GRID,
+                        kicker="Gallery",
+                        image_blocks=overflow_images,
+                        notes="额外参考图片",
+                    ))
+                logger.info(
+                    f"ImageAssigner distributed {sum(len(v) for v in assignments.values())} images "
+                    f"across {sum(1 for k, v in assignments.items() if k >= 0 and v)} pages"
+                )
+            except Exception as e:
+                logger.warning(f"ImageAssigner failed (fallback to gallery): {e}")
+                # fallback: 全部放图集页（旧行为）
+                all_images: List[HTMLImageBlock] = []
+                for img in (user_images or []):
+                    b64 = img.get("base64", "")
+                    if b64:
+                        all_images.append(HTMLImageBlock(
+                            url=f"data:image/png;base64,{b64}",
+                            caption=img.get("caption", ""),
+                            source="user_upload",
+                        ))
+                for img in (web_images or []):
+                    b64 = img.get("base64", "")
+                    if b64:
+                        all_images.append(HTMLImageBlock(
+                            url=f"data:image/png;base64,{b64}",
+                            caption=img.get("caption", "") or img.get("title", ""),
+                            source=img.get("source_url", ""),
+                        ))
+                if all_images:
+                    pages.append(HTMLPageModel(
+                        title="参考图片",
+                        layout=LayoutType.IMAGE_GRID,
+                        kicker="Gallery",
+                        image_blocks=all_images,
+                        notes="用户上传及网页提取的参考图片",
+                    ))
 
         # 7) Thanks page
         pages.append(HTMLPageModel(
@@ -1841,10 +2088,12 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                         self._extract_pages_from_llm_response(llm_report)
                     )
                     if extracted_pages is not None:
-                        # 把结构化页从 markdown 文本里剥掉（不污染 markdown 导出）
-                        # 简单做法：保留 markdown 原文，但在 metadata 里标记
-                        # 实际持久化时，workflow.py 会从 rep_out.pages 读取
-                        pass
+                        logger.info(
+                            "ReporterAgent: LLM structured JSON extracted successfully: "
+                            "%d pages, theme=%s, notes_summary=%d chars (task=%s)",
+                            len(extracted_pages), extracted_theme or "(default)",
+                            len(extracted_notes or ""), input_data.task_id,
+                        )
                     else:
                         logger.info(
                             "LLM did not return structured PageModel JSON for task '%s', "
@@ -1930,6 +2179,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                             theme=extracted_theme,
                             user_images=input_data.user_images,
                             web_images=input_data.web_images,
+                            extracted_pages=extracted_pages,
                         )
                         logger.info(f"HTML report generated ({len(html_content)} chars)")
                     except Exception as e:
@@ -2010,6 +2260,7 @@ Briefly note data sources. Do NOT list individual URLs - the system will append 
                 structured_metrics=input_data.analyzer_output.structured_metrics,
                 user_images=input_data.user_images,
                 web_images=input_data.web_images,
+                extracted_pages=None,  # template路径无LLM页面
             )
             logger.info(f"HTML report generated for template path ({len(html_content)} chars)")
         except Exception as e:

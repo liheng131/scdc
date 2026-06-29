@@ -675,7 +675,7 @@ const handleDeleteConversation = async (id: string) => {
   }
 };
 
-const handleExportReport = async (markdown: string, fmt: string, template_id?: string) => {
+const handleExportReport = async (markdown: string, fmt: string, template_id?: string, msgIdx?: number) => {
   if (fmt === 'md') {
     if (!markdown) return;
     const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
@@ -686,6 +686,39 @@ const handleExportReport = async (markdown: string, fmt: string, template_id?: s
     a.click();
     URL.revokeObjectURL(url);
     ElMessage.success('报告已导出');
+    return;
+  }
+
+  // HTML 导出：fetch iframe 中正在展示的 HTML + 后端内联 CSS 后下载
+  if (fmt === 'html' && msgIdx !== undefined) {
+    const iframe = document.querySelector(`iframe[data-msg-idx="${msgIdx}"]`) as HTMLIFrameElement | null;
+    if (!iframe) {
+      ElMessage.error('报告 iframe 未找到，请刷新页面后重试');
+      return;
+    }
+    const src = iframe.getAttribute('src');
+    if (!src) {
+      ElMessage.error('报告未加载完成');
+      return;
+    }
+    try {
+      // 通过后端内联 CSS 后返回
+      const token = localStorage.getItem('token') || '';
+      const inlineUrl = src.replace('/preview?', '/inline-html?') + '&token=' + token;
+      const response = await fetch(inlineUrl);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const htmlContent = await response.text();
+      const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `report_${Date.now()}.html`;
+      a.click();
+      URL.revokeObjectURL(url);
+      ElMessage.success('HTML 报告已导出');
+    } catch (e: any) {
+      ElMessage.error('导出失败：' + (e.message || '网络错误'));
+    }
     return;
   }
 
@@ -812,17 +845,36 @@ function changeTheme(idx: number, theme: string) {
   selectedTheme.value = theme;
   localStorage.setItem('html_ppt_theme', theme);
   themeByMessage.value[idx] = theme;
-  // 直接构建新 URL，无需 blob URL
-  const reportId = previewReportIds.value[idx] || reportIdCache.value[workflowStore.activeConversation?.id || ''];
-  if (reportId) {
-    const token = localStorage.getItem('token') || '';
-    const base = import.meta.env.VITE_API_BASE_URL || '';
-    previewBlobUrls.value[idx] = `${base}/api/v1/reports/${reportId}/preview?theme=${encodeURIComponent(theme)}&token=${encodeURIComponent(token)}`;
+  // 与 loadPreview 使用相同的 wfId 查找逻辑
+  const conv = workflowStore.activeConversation;
+  const wfId = conv?.id || conv?.serverWorkflowId || '';
+  const reportId = previewReportIds.value[idx]
+    || reportIdCache.value[wfId]
+    || reportIdCache.value[conv?.serverWorkflowId || '']
+    || reportIdCache.value[conv?.id || '']
+    || (messages.value[idx] as any)?.reportId;
+  if (!reportId) {
+    ElMessage.warning('报告未加载，无法切换主题');
+    return;
   }
+  const token = localStorage.getItem('token') || '';
+  const base = import.meta.env.VITE_API_BASE_URL || '';
+  const newUrl = `${base}/api/v1/reports/${reportId}/preview?theme=${encodeURIComponent(theme)}&token=${encodeURIComponent(token)}&_t=${Date.now()}`;
+  // 强制重建 iframe：先清空删除 DOM 中的旧 iframe，再 nextTick 后创建新 iframe
+  delete previewBlobUrls.value[idx];
+  nextTick(() => {
+    previewBlobUrls.value[idx] = newUrl;
+  });
 }
 
 async function openPresenterMode(idx: number) {
-  const reportId = previewReportIds.value[idx] || reportIdCache.value[workflowStore.activeConversation?.id || ''];
+  const conv = workflowStore.activeConversation;
+  const wfId = conv?.id || conv?.serverWorkflowId || '';
+  const reportId = previewReportIds.value[idx]
+    || reportIdCache.value[wfId]
+    || reportIdCache.value[conv?.serverWorkflowId || '']
+    || reportIdCache.value[conv?.id || '']
+    || (messages.value[idx] as any)?.reportId;
   if (!reportId) {
     ElMessage.warning('报告未加载，无法打开演讲者模式');
     return;
@@ -845,6 +897,11 @@ const loadPreview = async (msgIndex: number, msg: any) => {
   let reportId = msg.reportId || previewReportIds.value[msgIndex];
   if (!reportId) {
     reportId = reportIdCache.value[wfId];
+  }
+  // 如果已通过 msg.reportId 或缓存获得 reportId，也要更新缓存
+  if (reportId) {
+    reportIdCache.value[wfId] = reportId;
+    previewReportIds.value[msgIndex] = reportId;
   }
   if (!reportId) {
     try {
@@ -1070,7 +1127,7 @@ const formatTime = (ts: number) => {
                 <span class="stage-pulse"></span>
                 <span>{{ msg.stageHint }}</span>
               </div>
-              <div v-if="msg.stageStats && msg.stageStats.length" class="stage-stats">
+              <div v-if="msg.stageStats && msg.stageStats.length && !previewBlobUrls[idx]" class="stage-stats">
                 <div v-for="(stat, si) in msg.stageStats" :key="si" class="stage-stat-item">
                   <span class="stat-icon">{{ stat.icon }}</span>
                   <span class="stat-label">{{ stat.label }}</span>
@@ -1089,7 +1146,7 @@ const formatTime = (ts: number) => {
               >
                 <template #title>⚠️ AI 分析服务暂不可用，当前展示基于规则/模板生成的结果，报告质量可能受限。</template>
               </el-alert>
-              <div v-if="msg.partialStats && msg.partialStats.length" class="partial-stats">
+              <div v-if="msg.partialStats && msg.partialStats.length && !previewBlobUrls[idx]" class="partial-stats">
                 <div class="partial-stats-title">报告中段生成失败，但已完成以下阶段：</div>
                 <div v-for="(stat, si) in msg.partialStats" :key="si" class="partial-stat-item">
                   <span class="partial-stat-icon">{{ stat.icon }}</span>
@@ -1100,6 +1157,7 @@ const formatTime = (ts: number) => {
               <div
                 v-if="msg.reportMarkdown && !(loading && idx === messages.length - 1) && previewBlobUrls[idx]"
                 class="report-iframe-wrapper"
+                :key="'report-' + idx + '-' + (themeByMessage[idx] || selectedTheme)"
               >
                 <div class="report-toolbar">
                   <el-select
@@ -1116,7 +1174,7 @@ const formatTime = (ts: number) => {
                     🎤 演讲者模式
                   </el-button>
                 </div>
-                <iframe :src="previewBlobUrls[idx]" class="report-iframe" sandbox="allow-scripts allow-same-origin"></iframe>
+                <iframe :src="previewBlobUrls[idx]" class="report-iframe" :data-msg-idx="idx" sandbox="allow-scripts allow-same-origin"></iframe>
               </div>
               <!-- 非报告消息 / 报告尚未加载完成：显示原始内容 -->
               <div
@@ -1124,7 +1182,7 @@ const formatTime = (ts: number) => {
                 class="message-content assistant-content report-body"
                 v-html="msg.content"
               ></div>
-              <div v-if="msg.chartOptions && msg.chartOptions.length" class="charts-section">
+              <div v-if="msg.chartOptions && msg.chartOptions.length && !previewBlobUrls[idx]" class="charts-section">
                 <div
                   v-for="(_opt, ci) in msg.chartOptions"
                   :key="ci"
@@ -1136,7 +1194,7 @@ const formatTime = (ts: number) => {
                 <el-button size="small" text :icon="CopyDocument" @click="handleCopyReport(msg.reportMarkdown!)">
                   复制
                 </el-button>
-                <el-dropdown trigger="click" @command="(cmd: {fmt: string; template_id?: string}) => handleExportReport(msg.reportMarkdown!, cmd.fmt, cmd.template_id)">
+                <el-dropdown trigger="click" @command="(cmd: {fmt: string; template_id?: string}) => handleExportReport(msg.reportMarkdown!, cmd.fmt, cmd.template_id, idx)">
                   <el-button size="small" text :icon="Download">
                     导出报告
                   </el-button>
@@ -1145,6 +1203,7 @@ const formatTime = (ts: number) => {
                       <el-dropdown-item :command="{fmt: 'md'}">Markdown (.md)</el-dropdown-item>
                       <el-dropdown-item :command="{fmt: 'docx'}">Word (.docx)</el-dropdown-item>
                       <el-dropdown-item :command="{fmt: 'pdf'}">PDF (.pdf)</el-dropdown-item>
+                      <el-dropdown-item :command="{fmt: 'html'}">网页 (.html)</el-dropdown-item>
                       <el-sub-menu v-if="pptTemplates.length > 0" teleported>
                         <template #title>PowerPoint (.pptx)</template>
                         <el-dropdown-item

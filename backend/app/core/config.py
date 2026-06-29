@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     anysearch_base_url: str = "https://api.anysearch.com"  # AnySearch API base URL
     anysearch_default_max_results: int = 20             # AnySearch 单次请求默认返回数量
     anysearch_timeout: int = 15                          # AnySearch 请求默认超时（秒）
+    pexels_api_key: str = ""                             # Pexels 图片搜索 API Key
     milvus_url: str = "http://localhost:19530"           # Milvus 向量数据库
     opensearch_url: str = "http://localhost:9200"        # OpenSearch 全文搜索引擎
     minio_endpoint: str = "http://localhost:9000"        # MinIO 对象存储

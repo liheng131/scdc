@@ -535,6 +535,8 @@ class WorkflowService:
                             notes_summary=report_data.get("notes_summary"),
                             # html-ppt Phase 2: 完整 HTML 演示文稿
                             html_content=report_data.get("html_content", ""),
+                            # MinIO 存储的网页截图
+                            web_image_keys=report_data.get("web_image_keys", []),
                         )
                         report_id = report.id
                         logger.info(
@@ -827,6 +829,8 @@ class WorkflowService:
                         notes_summary=state.result.get("notes_summary"),
                         # html-ppt Phase 2: 完整 HTML 演示文稿
                         html_content=state.result.get("html_content", ""),
+                        # MinIO 存储的网页截图
+                        web_image_keys=state.result.get("web_image_keys", []),
                     )
                     report_id = report.id
         except Exception as e:
@@ -1025,6 +1029,34 @@ class WorkflowService:
         collecting_raw = (state.stages.get("collecting", {}) or {}).get("_raw", {})
         web_images = collecting_raw.get("extracted_images", [])
 
+        # 将大截图上传到 MinIO（避免 PostgreSQL JSON 膨胀）
+        web_image_keys = []
+        if web_images:
+            import base64 as _b64
+            import io as _io
+            from app.services.minio_client import minio_client as _minio
+            for idx, wi in enumerate(web_images):
+                b64_data = wi.get("base64", "")
+                if b64_data and len(b64_data) > 200:
+                    try:
+                        img_bytes = _b64.b64decode(b64_data)
+                        key = f"reports/{state.workflow_id}/web_{idx:03d}.png"
+                        _minio.put_object(
+                            key, _io.BytesIO(img_bytes), len(img_bytes),
+                            content_type="image/png",
+                        )
+                        web_image_keys.append({
+                            "minio_key": key,
+                            "title": wi.get("title", wi.get("caption", "")),
+                            "source_url": wi.get("source_url", ""),
+                        })
+                    except Exception as e:
+                        logger.warning("Failed to upload web_image[%d] to MinIO: %s", idx, e)
+            logger.info(
+                "[DEBUG][workflow] Uploaded %d/%d web_images to MinIO",
+                len(web_image_keys), len(web_images),
+            )
+
         reporter = ReporterAgent()
         rep_in = ReporterInput(
             task_id=state.workflow_id,
@@ -1082,6 +1114,8 @@ class WorkflowService:
             "notes_summary": rep_out.notes_summary or "",
             # html-ppt Phase 2: 完整 HTML 演示文稿
             "html_content": rep_out.html_content or "",
+            # MinIO 存储的网页截图 key 列表
+            "web_image_keys": web_image_keys,
         }
         return stage_output, raw_output
 

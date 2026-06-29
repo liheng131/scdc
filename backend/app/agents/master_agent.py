@@ -81,6 +81,15 @@ CHITCHAT_KEYWORDS = [
     "是什么", "干嘛",                                # 模糊询问
 ]
 
+# Market insight guard: 短文本（< 20 字）必须包含至少一个市场分析关键词，
+# 否则视为 classifier 误判，改判为 direct（避免简单问题误入四阶段工作流）
+MARKET_KEYWORDS = [
+    "市场", "分析", "趋势", "报告", "行业", "竞争", "格局",
+    "洞察", "调查", "研究", "动态", "战略", "商情",
+    "产业链", "调研", "规模", "增长", "份额", "对标",
+    "友商", "竞品", "预测", "展望",
+]
+
 
 @dataclass
 class MasterDecision:
@@ -163,6 +172,35 @@ class MasterAgent:
             use_rag,
         )
 
+        safe_message = message or ""
+
+        # ── Pre-filter: 无需 LLM 即可判定的简单消息，直接走直答 ──
+        # 1) 纯闲聊/能力询问（含关键词匹配）
+        if any(kw in safe_message for kw in CHITCHAT_KEYWORDS):
+            logger.info("MasterAgent pre-filter: chitchat keyword match → direct")
+            return MasterDecision(
+                action="direct", intent_type="general_question",
+                confidence=0.95,
+                reasoning="[pre-filter: 含闲聊/能力询问关键词]",
+                extra={"use_rag": use_rag},
+            )
+        # 2) 短消息（< 30 字）且不包含任何市场分析关键词 → 几乎不可能是 market_insight
+        if (
+            len(safe_message) < 30
+            and not any(kw in safe_message for kw in MARKET_KEYWORDS)
+        ):
+            logger.info(
+                "MasterAgent pre-filter: short msg (%d chars) without market keywords → direct",
+                len(safe_message),
+            )
+            return MasterDecision(
+                action="direct", intent_type="general_question",
+                confidence=0.9,
+                reasoning=f"[pre-filter: 短消息({len(safe_message)}字)+无市场关键词]",
+                extra={"use_rag": use_rag},
+            )
+
+        # ── LLM 分类 ──
         try:
             classification = await self.classify(
                 message,
@@ -205,7 +243,6 @@ class MasterAgent:
 
         # Reentry guard：短文本（< 20 字）且不含重入关键词 → 视为误判的 workflow_reentry，
         # 改判为 direct，避免误启动工作流
-        safe_message = message or ""
 
         # Guard 1: 短文本+无重入关键词 → reentry 误判
         if (
@@ -221,7 +258,7 @@ class MasterAgent:
             decision.reasoning = (decision.reasoning or "") + " [reentry-guard: 短文本+无重入关键词]"
 
         # Guard 2: 闲聊关键词 → orchestrate/reentry 误判
-        elif (
+        if (
             decision.action in ("reentry", "orchestrate")
             and any(kw in safe_message for kw in CHITCHAT_KEYWORDS)
         ):
@@ -231,6 +268,20 @@ class MasterAgent:
             )
             decision.action = "direct"
             decision.reasoning = (decision.reasoning or "") + " [chitchat-guard: 含闲聊关键词]"
+
+        # Guard 3: 短文本+无市场关键词 → orchestrate 误判
+        # 只有明确包含市场分析关键词的短文本才能进入四阶段工作流
+        if (
+            decision.action == "orchestrate"
+            and len(safe_message) < 20
+            and not any(kw in safe_message for kw in MARKET_KEYWORDS)
+        ):
+            logger.warning(
+                'market-guard: short msg "%s" without market keywords, falling back to direct',
+                safe_message,
+            )
+            decision.action = "direct"
+            decision.reasoning = (decision.reasoning or "") + " [market-guard: 短文本+无市场关键词]"
 
         logger.info(
             "MasterAgent decision: action=%s, intent=%s, confidence=%.2f",

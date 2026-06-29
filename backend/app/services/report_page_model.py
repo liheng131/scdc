@@ -28,7 +28,7 @@ USABLE_WIDTH = SLIDE_WIDTH_INCH - MARGIN_LEFT_INCH - MARGIN_RIGHT_INCH   # 12.33
 USABLE_HEIGHT = SLIDE_HEIGHT_INCH - MARGIN_TOP_INCH - MARGIN_BOTTOM_INCH  # 6.9
 
 # 布局限制
-MAX_CHARS_PER_PAGE = 800
+MAX_CHARS_PER_PAGE = 900  # 对标专业咨询报告 ~800-1200字/页，提升内容丰富度
 MAX_IMAGES_PER_PAGE = 3
 TEXT_AREA_MAX_HEIGHT = 3.0   # text_top 布局中文字区最大高度
 IMAGE_AREA_MAX_HEIGHT = 3.5  # text_top 布局中图片区最大高度
@@ -135,6 +135,7 @@ class PageModel:
     section_number: int = 0
     # html-ppt layout 名称（与 LayoutType 对齐，缺省由 _choose_layout 决定）
     layout: str = ""
+    chart_data: Optional[Dict[str, Any]] = None  # Chart.js 图表配置
 
     @property
     def total_chars(self) -> int:

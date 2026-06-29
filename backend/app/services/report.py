@@ -208,20 +208,30 @@ class ReportService:
         notes_summary: Optional[str] = None,
         # html-ppt Phase 2: 完整 HTML 演示文稿
         html_content: Optional[str] = None,
+        # MinIO 存储的网页截图 key 引用
+        web_image_keys: Optional[List[Dict[str, Any]]] = None,
     ) -> Report:
         # 合并 chart_images 和 dimension_illustrations
         all_images = []
         if chart_images:
             all_images.extend(chart_images)
         if dimension_illustrations:
-            # dimension_illustrations 格式: [{"section": str, "title": str, "base64": str, "position": int}]
-            # 转换为 chart_images 格式并保留 section 和 position 信息
             for ill in dimension_illustrations:
                 all_images.append({
                     "title": ill.get("title", ""),
                     "base64": ill.get("base64", ""),
                     "section": ill.get("section", ""),
                     "position": ill.get("position", 0),
+                })
+        # 合并 MinIO 存储的网页截图（只存 key 引用，不存 base64）
+        if web_image_keys:
+            for wk in web_image_keys:
+                all_images.append({
+                    "title": wk.get("title", ""),
+                    "base64": "",  # 不存 base64，从 MinIO 按需读取
+                    "storage": "minio",
+                    "minio_key": wk.get("minio_key", ""),
+                    "source_url": wk.get("source_url", ""),
                 })
 
         # 调试日志:记录合并后图片数量
@@ -1158,7 +1168,8 @@ class ReportService:
 
     async def export_report_with_html_pipeline(
         self, session: AsyncSession, report_id: int, fmt: str, 
-        page_model: ReportPageModel, template_id: Optional[str] = None
+        page_model: ReportPageModel, template_id: Optional[str] = None,
+        theme: str = "minimal-white"
     ) -> Tuple[str, str, bytes]:
         """
         使用 HTML 生成流程导出报告
@@ -1188,7 +1199,90 @@ class ReportService:
             HTMLReportGenerator, HTMLPageModel, HTMLTextBlock, HTMLImageBlock, LayoutType,
         )
         html_pages = self._convert_pages_to_html(page_model.pages)
-        generator = HTMLReportGenerator()
+        
+        # 注入图片：从三个来源收集（report.images + MinIO + html_content）
+        all_raw_images = []
+        stored_images = (r.images or []) if hasattr(r, 'images') else []
+        seen_base64_prefix = set()
+        
+        def _add_image(b64: str, title: str = "", caption: str = "", source_url: str = ""):
+            """去重添加图片"""
+            b64_fixed = b64.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+            if not b64_fixed or len(b64_fixed) < 100:
+                return
+            # 修复 base64 padding
+            missing = len(b64_fixed) % 4
+            if missing:
+                b64_fixed += '=' * (4 - missing)
+            prefix = b64_fixed[:40]
+            if prefix in seen_base64_prefix:
+                return
+            seen_base64_prefix.add(prefix)
+            all_raw_images.append({
+                "base64": b64_fixed,
+                "title": title, "caption": caption, "source_url": source_url,
+            })
+        
+        # 来源 1：report.images 中的 inline base64（修复 padding）
+        for img in stored_images:
+            storage = img.get("storage", "")
+            if storage == "minio":
+                continue  # 来源 2 处理
+            b64 = img.get("base64", "")
+            _add_image(b64, img.get("title", "") or img.get("section", ""), img.get("title", ""))
+        
+        # 来源 2：从 MinIO 下载 web_images
+        minio_images = [img for img in stored_images if img.get("storage") == "minio"]
+        if minio_images:
+            import base64 as _b64
+            from app.services.minio_client import minio_client as _minio
+            for img in minio_images:
+                mkey = img.get("minio_key", "")
+                if mkey:
+                    try:
+                        data = _minio.get_object(mkey)
+                        if data:
+                            b64 = _b64.b64encode(data).decode("ascii")
+                            _add_image(b64, img.get("title", ""), img.get("title", ""), img.get("source_url", ""))
+                    except Exception as e:
+                        logger.warning("Failed to read MinIO key %s: %s", mkey, e)
+        
+        # 来源 3：从 report.html_content 提取（含 ImageAssigner 分配的图片）
+        if r.html_content:
+            import re as _re
+            count = 0
+            for m in _re.finditer(
+                r'data:image/[^;]+;base64,([A-Za-z0-9+/=\s]+)',
+                r.html_content[:500000],
+            ):
+                b64 = m.group(1)
+                if _add_image(b64, "", "", "from_html_content") is not False:
+                    count += 1
+            if count:
+                logger.info("Extracted %d base64 images from report.html_content", count)
+        
+        # 注入到 html_pages
+        if all_raw_images:
+            try:
+                from app.services.image_assigner import image_assigner
+                assignments = image_assigner.assign(html_pages, all_raw_images, None)
+                for page_idx, img_blocks in assignments.items():
+                    if 0 <= page_idx < len(html_pages):
+                        html_pages[page_idx].image_blocks = (
+                            list(html_pages[page_idx].image_blocks) + img_blocks
+                        )
+                injected = sum(len(v) for k, v in assignments.items() if k >= 0)
+                overflow = len(assignments.get(-1, []))
+                logger.info(
+                    "Injected %d images into %d pages (overflow=%d, total_raw=%d)",
+                    injected,
+                    sum(1 for k, v in assignments.items() if k >= 0 and v),
+                    overflow, len(all_raw_images),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to inject images for export: {e}")
+        
+        generator = HTMLReportGenerator(theme=theme)
         html_content = generator.generate(html_pages)
         
         logger.info(f"HTML generated for report {report_id}: {len(html_content)} chars")
@@ -1202,7 +1296,8 @@ class ReportService:
                 tmp_path = tmp.name
             
             try:
-                await converter.convert(html_content, tmp_path, template_id)
+                # v2: 传递 html_pages 以启用原生 PPTX 渲染（非截图）
+                await converter.convert(html_content, tmp_path, template_id, pages=html_pages)
                 with open(tmp_path, 'rb') as f:
                     data = f.read()
             finally:
@@ -1275,6 +1370,66 @@ class ReportService:
             result = (
                 f"report_{r.id}.md",
                 "text/markdown",
+                data
+            )
+
+        elif fmt == "html":
+            # 自包含 HTML 导出：position:absolute 堆叠模式 + runtime.js 键盘导航
+            # 1) 优先用 r.html_content，否则用 page_model 重新生成
+            stored = (r.html_content or "").strip()
+            has_slides = '<section class="slide"' in stored or 'class="slide"' in stored
+            if stored and len(stored) > 500 and has_slides:
+                source_html = stored
+            else:
+                generator = HTMLReportGenerator(theme=theme)
+                source_html = generator.generate(html_pages)
+            
+            # 2) 替换主题
+            import re
+            source_html = re.sub(r'data-theme="[^"]*"', f'data-theme="{theme}"', source_html)
+            source_html = re.sub(
+                r'href="[^"]*themes/[^"]*\.css"',
+                f'href="assets/themes/{theme}.css"',
+                source_html,
+            )
+            
+            # 3) 去掉 body.single（导出需要键盘导航，不用单页滚动模式）
+            source_html = source_html.replace('class="single" ', '')
+            source_html = source_html.replace('class="single"', '')
+            source_html = source_html.replace("class='single' ", '')
+            source_html = re.sub(
+                r'<div class="deck" style="overflow:auto;height:auto"',
+                '<div class="deck"',
+                source_html,
+            )
+            
+            # 4) 注入启动脚本：只激活 slide 0，不破坏 absolute 堆叠
+            INIT_SCRIPT = (
+                '<script>document.addEventListener("DOMContentLoaded",function(){'
+                'var slides=document.querySelectorAll(".slide");'
+                'if(slides.length&&!document.querySelector(".slide.is-active")){'
+                ' slides[0].classList.add("is-active");'
+                ' var bar=document.querySelector(".progress-bar span");'
+                ' if(bar)bar.style.width=(1/slides.length*100)+"%";'
+                '}});</script>'
+            )
+            # 移除旧的 fallback（如果有）
+            source_html = re.sub(
+                r'<script>document\.addEventListener\("DOMContentLoaded".*?is-active[^<]*?</script>',
+                '',
+                source_html,
+                flags=re.DOTALL,
+            )
+            if INIT_SCRIPT not in source_html and '</body>' in source_html:
+                source_html = source_html.replace('</body>', INIT_SCRIPT + '\n</body>')
+            
+            # 5) 内联所有外部 CSS/JS
+            stand_alone_html = HTMLReportGenerator.make_self_contained(source_html)
+            data = stand_alone_html.encode("utf-8")
+            logger.info("HTML export: theme=%s, result=%d bytes", theme, len(data))
+            result = (
+                f"report_{r.id}.html",
+                "text/html; charset=utf-8",
                 data
             )
         
@@ -1411,8 +1566,9 @@ class ReportService:
                 kicker=kicker,
                 text_blocks=text_blocks,
                 image_blocks=image_blocks,
-                kpi_metrics=[],
+                kpi_metrics=page.kpi_metrics or [],
                 table_data=table_data,
+                chart_data=getattr(page, "chart_data", None),
             )
             html_pages.append(html_page)
 
@@ -1456,8 +1612,20 @@ class ReportService:
             result = (f"report_{r.id}.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", data)
         elif fmt == "md" or fmt == "markdown":
             result = (f"report_{r.id}.md", "text/markdown", self.generate_markdown(r))
+        elif fmt == "html":
+            from app.services.html_report_generator import HTMLReportGenerator
+            source = (r.html_content or "") if hasattr(r, 'html_content') else ""
+            if len(source.strip()) < 500:
+                # Fallback: 生成基础 HTML
+                source = f"<!DOCTYPE html>\n<html><head><meta charset='UTF-8'></head><body>{self.generate_markdown(r).decode('utf-8', errors='replace')}</body></html>"
+            stand_alone = HTMLReportGenerator.make_self_contained(source)
+            result = (
+                f"report_{r.id}.html",
+                "text/html; charset=utf-8",
+                stand_alone.encode("utf-8")
+            )
         else:
-            raise ValueError("Unsupported format. Use docx, pdf, pptx, or md.")
+            raise ValueError("Unsupported format. Use docx, pdf, pptx, md, or html.")
 
         return result
 

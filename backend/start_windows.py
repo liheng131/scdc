@@ -35,8 +35,8 @@ if sys.platform == "win32":
 
     # 设置正确的策略
     asyncio.set_event_loop_policy(WindowsProactorEventLoopPolicy())
-    print("[start_windows] ✅ WindowsProactorEventLoopPolicy set")
-    print("[start_windows] ✅ Monkey-patched asyncio.set_event_loop_policy to block SelectorEventLoop")
+    print("[start_windows] [OK] WindowsProactorEventLoopPolicy set")
+    print("[start_windows] [OK] Monkey-patched asyncio.set_event_loop_policy to block SelectorEventLoop")
 
 # === 第二优先级: 把 backend 加入 PYTHONPATH, 避免 ModuleNotFoundError ===
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))

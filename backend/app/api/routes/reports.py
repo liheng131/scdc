@@ -219,8 +219,8 @@ async def preview_report_html(
             theme = "minimal-white"
 
         html_content = report.html_content
-        # 替换 data-theme 属性
         import re
+        # 替换 data-theme 属性
         html_content = re.sub(r'data-theme="[^"]*"', f'data-theme="{theme}"', html_content)
         # 替换主题 CSS 链接
         html_content = re.sub(
@@ -228,6 +228,72 @@ async def preview_report_html(
             f'href="/static/html-ppt/assets/themes/{theme}.css"',
             html_content,
         )
+        # 修复所有 assets/ 相对路径 → 绝对路径（fonts.css/base.css/runtime.js 等）
+        # 避免从 /api/v1/reports/{id}/preview 解析时变成 404
+        html_content = html_content.replace(
+            'href="assets/', 'href="/static/html-ppt/assets/'
+        )
+        html_content = html_content.replace(
+            "href='assets/", "href='/static/html-ppt/assets/"
+        )
+        html_content = html_content.replace(
+            'src="assets/', 'src="/static/html-ppt/assets/'
+        )
+        html_content = html_content.replace(
+            "src='assets/", "src='/static/html-ppt/assets/"
+        )
+        # 修复 data-theme-base（runtime.js 动态加载主题用）
+        html_content = html_content.replace(
+            'data-theme-base="assets/', 'data-theme-base="/static/html-ppt/assets/'
+        )
+
+        # 确保所有幻灯片在预览模式下可见（iframe 中 runtime.js 可能未执行）
+        # 1) 给 body 添加 single class（如果是预览模式，但 single class 还未添加）
+        if 'class="single"' not in html_content and "<body " in html_content:
+            html_content = html_content.replace("<body ", '<body class="single" ', 1)
+        # 2) 确保 deck 允许滚动（overflow: auto; height: auto）
+        if '<div class="deck"' in html_content and 'overflow:auto;height:auto' not in html_content:
+            html_content = html_content.replace(
+                '<div class="deck"', '<div class="deck" style="overflow:auto;height:auto"', 1
+            )
+        # 3) 注入 CSS 补丁 + fallback JS（body.single 模式：内容不截断 + 键盘滚动导航）
+        SINGLE_CSS_PATCH = (
+            '<style>body.single .deck{height:auto!important;overflow:auto!important} '
+            'body.single .slide{min-height:100vh;height:auto;overflow:visible;justify-content:flex-start}</style>'
+        )
+        if SINGLE_CSS_PATCH not in html_content:
+            html_content = html_content.replace('</head>', SINGLE_CSS_PATCH + '\n</head>', 1)
+        FALLBACK_SCRIPT = (
+            '<script>document.addEventListener("DOMContentLoaded",function(){'
+            'var s=document.querySelectorAll(".slide");'
+            'if(!s.length)return;'
+            'if(!document.querySelector(".slide.is-active")){'
+            's.forEach(function(el,i){'
+            'el.style.opacity="1";el.style.pointerEvents="auto";el.style.transform="none";'
+            'el.style.position="relative";el.style.height="auto";el.style.minHeight="100vh";el.style.overflow="visible";'
+            'if(i===0)el.classList.add("is-active");'
+            '});'
+            '}'
+            'var cur=0;'
+            'function go(n){'
+            'n=Math.max(0,Math.min(s.length-1,n));'
+            'cur=n;'
+            's.forEach(function(el,i){el.classList.toggle("is-active",i===n);});'
+            's[n].scrollIntoView({behavior:"smooth",block:"start"});'
+            'var b=document.querySelector(".progress-bar span");if(b)b.style.width=((n+1)/s.length*100)+"%";'
+            '}'
+            'document.addEventListener("keydown",function(e){'
+            'if(e.metaKey||e.ctrlKey||e.altKey)return;'
+            'switch(e.key){'
+            'case "ArrowRight":case " ":case "PageDown":go(cur+1);e.preventDefault();break;'
+            'case "ArrowLeft":case "PageUp":go(cur-1);e.preventDefault();break;'
+            'case "Home":go(0);break;'
+            'case "End":go(s.length-1);break;'
+            '}});'
+            '});</script>'
+        )
+        if FALLBACK_SCRIPT not in html_content and '</body>' in html_content:
+            html_content = html_content.replace('</body>', FALLBACK_SCRIPT + '\n</body>')
 
         logging.getLogger(__name__).info(
             "[preview] report %s using stored html_content (%d chars, theme=%s)",
@@ -340,12 +406,68 @@ async def preview_report_html(
         media_type="text/html; charset=utf-8",
     )
 
+
+@router.get("/{report_id}/inline-html")
+async def inline_html_report(
+    report_id: int,
+    theme: str = Query("minimal-white"),
+    current_user: User = Depends(get_current_active_user_sse),
+    session: AsyncSession = Depends(get_db)
+) -> Response:
+    """独立 HTML 文件（自包含 + 键盘导航可用）
+
+    与 /preview 的区别：去掉 body.single（单页滚动模式），改为正常的
+    position:absolute 堆叠模式，让 runtime.js 的键盘翻页正常工作。
+    """
+    import re
+    from app.services.html_report_generator import HTMLReportGenerator as _Gen
+    html_response = await preview_report_html(report_id, theme, current_user, session)
+    html_content = html_response.body.decode("utf-8") if isinstance(html_response.body, bytes) else str(html_response.body)
+
+    # ── 去掉 body.single，恢复正常的 absolute 堆叠模式 ──
+    html_content = html_content.replace('class="single" ', '')
+    html_content = html_content.replace('class="single"', '')
+    html_content = html_content.replace("class='single' ", '')
+
+    # ── 去掉 deck 的 overflow/height 覆盖（normal 模式需要默认值） ──
+    html_content = re.sub(
+        r'<div class="deck" style="overflow:auto;height:auto"',
+        '<div class="deck"',
+        html_content,
+    )
+
+    # ── 移除旧 fallback JS（强制所有 slide position:relative，破坏键盘导航）──
+    html_content = re.sub(
+        r'<script>document\.addEventListener\([\x27"]DOMContentLoaded[\x27"].*?style\.position\s*=\s*[\x27"]relative[\x27"].*?</script>',
+        '',
+        html_content,
+        flags=re.DOTALL,
+    )
+    # ── 注入启动脚本：只激活 slide 0，不破坏 position:absolute 堆叠 ──
+    INIT_SCRIPT = (
+        '<script>document.addEventListener("DOMContentLoaded",function(){'
+        'var slides=document.querySelectorAll(".slide");'
+        'if(slides.length&&!document.querySelector(".slide.is-active")){'
+        ' slides[0].classList.add("is-active");'
+        ' var bar=document.querySelector(".progress-bar span");'
+        ' if(bar)bar.style.width=(1/slides.length*100)+"%";'
+        '}});</script>'
+    )
+    if '</body>' in html_content:
+        html_content = html_content.replace('</body>', INIT_SCRIPT + '\n</body>')
+
+    # ── 内联所有 CSS/JS ──
+    inlined = _Gen.make_self_contained(html_content)
+    return Response(content=inlined, media_type="text/html; charset=utf-8")
+
+
 @router.get("/{report_id}/export")
 async def export_report(
     report_id: int,
-    fmt: str = Query("docx", description="导出格式:docx、pdf、md、pptx"),
+    fmt: str = Query("docx", description="导出格式:docx、pdf、md、pptx、html"),
     template_id: Optional[str] = Query(None, description="PPT 母版模板 ID（仅当 fmt=pptx 时生效）"),
     use_html_pipeline: bool = Query(True, description="是否使用HTML生成流程（高质量）"),
+    theme: str = Query("minimal-white", description="html-ppt 主题名（36 套之一，仅 html/md/docx/pdf 生效）"),
     current_user: User = Depends(get_current_active_user_sse),
     session: AsyncSession = Depends(get_db)
 ) -> Response:
@@ -461,7 +583,7 @@ async def export_report(
 
             # 使用 HTML 流程导出
             filename, media_type, content = await rep_service.export_report_with_html_pipeline(
-                session, report_id, fmt, page_model, template_id
+                session, report_id, fmt, page_model, template_id, theme=theme
             )
         else:
             # 使用旧版流程

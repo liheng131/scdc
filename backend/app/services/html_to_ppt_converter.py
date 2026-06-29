@@ -1,105 +1,127 @@
 """
-HTML → PPT 转换器
+HTML → PPT 转换器（兼容接口 + 原生渲染委托）
 
-流程：
-1. 用Playwright将HTML每页渲染为截图
-2. 创建PPT，每页插入一张全屏截图
+v2: 委托到 PPTXNativeRenderer 做原生 python-pptx 渲染（可编辑文字/图片），
+    不再使用截图方案。
+
+旧版行为（v1）：Playwright 截图 → 插入 PPT 位图
+新版行为（v2）：HTMLPageModel → python-pptx 原生元素
 """
 
 import logging
 import os
-import tempfile
-from typing import Optional
+from typing import List, Optional
 
-from pptx import Presentation
-from pptx.util import Inches, Pt
-
-from app.services.playwright_renderer import PlaywrightRenderer
+from app.services.html_report_generator import HTMLPageModel
+from app.services.pptx_native_renderer import PPTXNativeRenderer
 
 logger = logging.getLogger(__name__)
 
 
 class HTMLToPPTConverter:
     """
-    HTML → PPT转换器
-    
-    将HTML演示文稿转换为PPT格式。
-    每页HTML渲染为截图后插入PPT，保持视觉质量。
+    HTML → PPT 转换器（兼容接口）
+
+    v2: 委托到 PPTXNativeRenderer 做原生渲染。
+        接受 HTML 字符串，内部解析 slide 列表，使用原生元素生成 PPTX。
+
+    如果调用方有 HTMLPageModel 列表，直接使用 PPTXNativeRenderer.render() 更快。
     """
-    
+
     def __init__(self):
-        self.renderer = PlaywrightRenderer()
-    
+        pass
+
     async def convert(
-        self, 
-        html: str, 
-        output_path: str, 
-        template_id: Optional[str] = None
+        self,
+        html: str,
+        output_path: str,
+        template_id: Optional[str] = None,
+        pages: Optional[List[HTMLPageModel]] = None,
     ):
-        """
-        将HTML转换为PPT
-        
+        """将 HTML/PageModel 转换为 PPT
+
         Args:
-            html: 完整的HTML字符串
-            output_path: PPT输出路径
-            template_id: PPT模板ID（可选，用于添加母版）
+            html: HTML 字符串（当 pages=None 时使用，降级到旧版截图）
+            output_path: PPT 输出路径
+            template_id: PPT 模板 ID（可选）
+            pages: HTML 页面模型列表（优先使用，原生渲染）
         """
+        template_path = self._resolve_template_path(template_id)
+
+        if pages:
+            # 新版：原生渲染
+            logger.info(f"PPTXNativeRenderer: rendering {len(pages)} slides natively")
+            renderer = PPTXNativeRenderer(template_path=template_path)
+            renderer.render(pages, output_path, title="Market Insight Report")
+            logger.info(f"Native PPTX saved: {output_path}")
+        else:
+            # 降级：截图方案（当没有 PageModel 时）
+            logger.warning(
+                "HTMLToPPTConverter: no pages provided, falling back to screenshot mode. "
+                "For best quality, pass HTMLPageModel list."
+            )
+            await self._convert_screenshot_fallback(html, output_path, template_path)
+
+    async def _convert_screenshot_fallback(
+        self, html: str, output_path: str, template_path: Optional[str] = None,
+    ):
+        """降级到截图方案（旧行为）"""
+        import tempfile
+        from pptx import Presentation
+        from app.services.playwright_renderer import PlaywrightRenderer
+
+        renderer = PlaywrightRenderer()
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 1. 渲染截图
-            logger.info("Rendering HTML to screenshots...")
-            screenshot_paths = await self.renderer.render_to_screenshots(html, tmpdir)
-            
+            screenshot_paths = await renderer.render_to_screenshots(html, tmpdir)
             if not screenshot_paths:
                 raise ValueError("No screenshots generated from HTML")
-            
-            logger.info(f"Generated {len(screenshot_paths)} screenshots")
-            
-            # 2. 创建PPT
-            prs = Presentation()
-            
-            # 如果指定了模板，应用模板
-            if template_id:
-                self._apply_template(prs, template_id)
-            
-            # 3. 每页插入截图
-            for i, screenshot_path in enumerate(screenshot_paths):
-                logger.debug(f"Adding slide {i+1}/{len(screenshot_paths)}")
-                
-                # 使用空白布局
-                slide_layout = prs.slide_layouts[6]  # 空白布局
+
+            prs = Presentation(template_path) if template_path else Presentation()
+            for sp in screenshot_paths:
+                slide_layout = prs.slide_layouts[6]
                 slide = prs.slides.add_slide(slide_layout)
-                
-                # 插入全屏图片
                 slide.shapes.add_picture(
-                    screenshot_path,
-                    left=0,
-                    top=0,
-                    width=prs.slide_width,
-                    height=prs.slide_height
+                    sp, left=0, top=0,
+                    width=prs.slide_width, height=prs.slide_height,
                 )
-            
-            # 4. 保存PPT
             prs.save(output_path)
-            logger.info(f"PPT saved: {output_path}")
-    
-    def _apply_template(self, prs: Presentation, template_id: str):
-        """
-        应用PPT模板（占位实现）
+            logger.info(f"Fallback PPT saved: {output_path}")
 
-        ⚠️ NOT IMPLEMENTED: 当前 HTML 流程的 PPT 母版样式尚未实现.
-        调用方传入 template_id 时, 此方法仅记录 WARN, 不影响生成结果.
-
-        实现路线 (后续):
-        1. 从 backend/data/pptx/template_<id>.pptx 读取母版
-        2. 用 Presentation(template_path) 替换 prs 的 slide_masters
-        3. 或逐张 slide 应用 layouts[template_id]
-
-        替代方案: 旧 export_report 路径 (use_html_pipeline=false) 使用
-        PPTTemplateService.fill_template_from_model 真正支持模板, 用户可临时回退.
-        """
-        logger.warning(
-            "PPT template_id=%r is ignored by HTML pipeline (not implemented). "
-            "Output PPT will use python-pptx default blank layout. "
-            "Fallback: use use_html_pipeline=false for template support.",
-            template_id,
+    def _resolve_template_path(self, template_id: Optional[str]) -> Optional[str]:
+        """根据 template_id 解析模板文件路径"""
+        import glob
+        
+        # 优先查 PPT 模板缓存目录
+        cache_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "templates", "ppt", "cache"
         )
+        if os.path.isdir(cache_dir):
+            # 查找匹配的模板文件 (template{id}.pptx.*.clean.pptx)
+            pattern = f"template{template_id}.pptx.*.clean.pptx" if template_id else "template1.pptx.*.clean.pptx"
+            matches = glob.glob(os.path.join(cache_dir, pattern))
+            if matches:
+                # 取最新的
+                path = max(matches, key=os.path.getmtime)
+                logger.info(f"Resolved template path from cache: {path}")
+                return path
+        
+        # 其次查工作目录
+        if template_id:
+            candidates = [
+                f"模板{template_id}.pptx",
+                f"template_{template_id}.pptx",
+                os.path.join("backend", "data", "pptx", f"template_{template_id}.pptx"),
+            ]
+            for path in candidates:
+                if os.path.exists(path):
+                    return path
+        
+        # 无 template_id：尝试默认模板1
+        if not template_id:
+            default = self._resolve_template_path("1")
+            if default:
+                return default
+        
+        logger.warning("No PPT template found, using default blank presentation")
+        return None

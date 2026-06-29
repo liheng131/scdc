@@ -86,6 +86,13 @@ class HTMLReportGenerator:
         # 检测可用主题
         self.available_themes = self._scan_themes()
 
+    # ── 静态资源目录 ──
+    @staticmethod
+    def _assets_dir() -> str:
+        """返回 html-ppt assets 目录的绝对路径"""
+        import os
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "html-ppt", "assets")
+
     def _assets_relpath(self) -> str:
         """生成资源路径
 
@@ -258,12 +265,42 @@ body {{ background: var(--bg); }}
 }}
 </style>
 </head>
-<body data-themes="{themes_csv}" data-theme-base="{self._assets_relpath()}/themes/">
-<div class="deck">
+<body class="single" data-themes="{themes_csv}" data-theme-base="{self._assets_relpath()}/themes/">
+<div class="deck" style="overflow:auto;height:auto">
 {slides_html}
 </div>
 <script src="{self._assets_relpath()}/runtime.js"></script>
 <script src="{self._assets_relpath()}/animations/fx-runtime.js" defer></script>
+<!-- Fallback: body.single 模式下键盘滚动导航（iframe 预览用） -->
+<style>body.single .deck{{height:auto!important;overflow:auto!important}} body.single .slide{{min-height:100vh;height:auto;overflow:visible;justify-content:flex-start}}</style>
+<script>document.addEventListener('DOMContentLoaded',function(){{
+var s=document.querySelectorAll('.slide');
+if(!s.length)return;
+if(!document.querySelector('.slide.is-active')){{
+s.forEach(function(el,i){{
+el.style.opacity='1';el.style.pointerEvents='auto';el.style.transform='none';
+el.style.position='relative';el.style.height='auto';el.style.minHeight='100vh';el.style.overflow='visible';
+if(i===0)el.classList.add('is-active');
+}});
+}}
+var cur=0;
+function go(n){{
+n=Math.max(0,Math.min(s.length-1,n));
+cur=n;
+s.forEach(function(el,i){{el.classList.toggle('is-active',i===n);}});
+s[n].scrollIntoView({{behavior:'smooth',block:'start'}});
+var b=document.querySelector('.progress-bar span');if(b)b.style.width=((n+1)/s.length*100)+'%';
+}}
+document.addEventListener('keydown',function(e){{
+if(e.metaKey||e.ctrlKey||e.altKey)return;
+switch(e.key){{
+case 'ArrowRight':case ' ':case 'PageDown':go(cur+1);e.preventDefault();break;
+case 'ArrowLeft':case 'PageUp':go(cur-1);e.preventDefault();break;
+case 'Home':go(0);break;
+case 'End':go(s.length-1);break;
+}}
+}});
+}});</script>
 </body>
 </html>"""
 
@@ -812,6 +849,80 @@ body {{ background: var(--bg); }}
             '  </div>'
         )
         return self._wrap_slide(page, idx, total, body)
+
+    # ── 自包含 HTML 导出 ──
+    @staticmethod
+    def make_self_contained(html_content: str) -> str:
+        """将 HTML 内容转为自包含单文件（内联所有 CSS/JS）
+
+        替换所有本地 <link> 和 <script src> 为内联 <style> 和 <script>，
+        使 HTML 文件可以脱离服务器独立运行（双击打开、微信/邮件发送）。
+        CDN 引用（如 Chart.js）保持不变。
+        """
+        import os, re
+        assets_dir = HTMLReportGenerator._assets_dir()
+
+        # 1) 内联 CSS：href="/static/html-ppt/assets/..." 或 href="assets/..."
+        def inline_css(match: re.Match) -> str:
+            url = match.group(1)
+            filename = url.rsplit("/", 1)[-1]  # e.g., "base.css", "themes/minimal-white.css"
+            # 处理子目录
+            if "/themes/" in url:
+                filepath = os.path.join(assets_dir, "themes", filename)
+            elif "/animations/" in url:
+                # url like "...assets/animations/animations.css"
+                parts = url.split("/")
+                if len(parts) >= 2:
+                    filepath = os.path.join(assets_dir, parts[-2], filename)
+                else:
+                    filepath = os.path.join(assets_dir, filename)
+            else:
+                filepath = os.path.join(assets_dir, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    css = f.read()
+                logger.info("make_self_contained: inlined CSS %s (%d bytes)", filename, len(css))
+                return f"<style>/* {filename} */\n{css}\n</style>"
+            except Exception as e:
+                logger.warning("make_self_contained: failed to inline CSS %s: %s", filename, e)
+                return match.group(0)  # keep original
+
+        html_content = re.sub(
+            r'<link[^>]*href="[^"]*/([^"]+\.css)"[^>]*>',
+            inline_css,
+            html_content,
+        )
+
+        # 2) 内联本地 JS：src="/static/html-ppt/assets/..." 或 src="assets/..."
+        def inline_js(match: re.Match) -> str:
+            url = match.group(1)
+            # 跳过 CDN 引用
+            if url.startswith("http://") or url.startswith("https://"):
+                return match.group(0)
+            filename = url.rsplit("/", 1)[-1]
+            subdir = ""
+            if "/animations/" in url:
+                parts = url.split("/")
+                if len(parts) >= 2:
+                    subdir = parts[-2] + "/"
+            filepath = os.path.join(assets_dir, subdir, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    js = f.read()
+                logger.info("make_self_contained: inlined JS %s (%d bytes)", filename, len(js))
+                return f"<script>/* {filename} */\n{js}\n</script>"
+            except Exception as e:
+                logger.warning("make_self_contained: failed to inline JS %s: %s", filename, e)
+                return match.group(0)
+
+        html_content = re.sub(
+            r'<script src="([^"]+)"[^>]*></script>',
+            inline_js,
+            html_content,
+        )
+
+        logger.info("make_self_contained: done, output %d bytes", len(html_content))
+        return html_content
 
 
 # ============================================================
